@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { prisma } from "@/lib/db";
 import { marked } from "marked";
+import DOMPurify from "isomorphic-dompurify";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -50,7 +51,7 @@ export default async function CompanyDetailPage({
     { draft: 0, approved: 0, sent: 0 } as Record<string, number>
   );
 
-  const researchHtml = await marked(company.research);
+  const researchHtml = DOMPurify.sanitize(await marked(company.research));
 
   return (
     <div className="space-y-8">

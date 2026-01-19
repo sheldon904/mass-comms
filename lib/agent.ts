@@ -1,8 +1,12 @@
 import Anthropic from "@anthropic-ai/sdk";
 
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
+function getAnthropicClient(): Anthropic {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    throw new Error("ANTHROPIC_API_KEY environment variable is not set");
+  }
+  return new Anthropic({ apiKey });
+}
 
 interface DraftEmailParams {
   companyName: string;
@@ -46,6 +50,8 @@ SUBJECT: [subject line here]
 BODY:
 [email body here]`;
 
+  const anthropic = getAnthropicClient();
+
   const response = await anthropic.messages.create({
     model: "claude-sonnet-4-20250514",
     max_tokens: 1024,
@@ -58,12 +64,21 @@ BODY:
     system: systemPrompt,
   });
 
+  // Validate response has content
+  if (!response.content || response.content.length === 0) {
+    throw new Error("Empty response from Claude");
+  }
+
   const content = response.content[0];
   if (content.type !== "text") {
     throw new Error("Unexpected response type from Claude");
   }
 
   const text = content.text;
+
+  if (!text || text.trim().length === 0) {
+    throw new Error("Empty text response from Claude");
+  }
   const subjectMatch = text.match(/SUBJECT:\s*(.+?)(?:\n|$)/);
   const bodyMatch = text.match(/BODY:\s*([\s\S]+)$/);
 

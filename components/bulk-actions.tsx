@@ -23,17 +23,35 @@ export function BulkActions({ emails, action }: BulkActionsProps) {
     if (!confirm(`Approve all ${emails.length} draft emails?`)) return;
 
     setIsLoading(true);
+    const failures: string[] = [];
+
     try {
       for (const email of emails) {
-        await fetch(`/api/emails/${email.id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: "approved" }),
-        });
+        try {
+          const response = await fetch(`/api/emails/${email.id}`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ status: "approved" }),
+          });
+
+          if (!response.ok) {
+            failures.push(email.id);
+          }
+        } catch {
+          failures.push(email.id);
+        }
       }
+
+      if (failures.length > 0) {
+        alert(
+          `Approved ${emails.length - failures.length} emails. ${failures.length} failed to approve.`
+        );
+      }
+
       router.refresh();
     } catch (error) {
       console.error("Error in bulk approve:", error);
+      alert("Failed to approve emails. Please try again.");
     } finally {
       setIsLoading(false);
     }

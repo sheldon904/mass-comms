@@ -4,7 +4,11 @@ let resendClient: Resend | null = null;
 
 export function getResend(): Resend {
   if (!resendClient) {
-    resendClient = new Resend(process.env.RESEND_API_KEY);
+    const apiKey = process.env.RESEND_API_KEY;
+    if (!apiKey) {
+      throw new Error("RESEND_API_KEY environment variable is not set");
+    }
+    resendClient = new Resend(apiKey);
   }
   return resendClient;
 }

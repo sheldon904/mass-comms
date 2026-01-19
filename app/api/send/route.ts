@@ -2,14 +2,37 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { resend } from "@/lib/resend";
 
+const MAX_BATCH_SIZE = 100;
+const CUID_REGEX = /^c[a-z0-9]{24}$/;
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const { emailIds } = body;
 
+    // Validate emailIds array
     if (!emailIds || !Array.isArray(emailIds) || emailIds.length === 0) {
       return NextResponse.json(
         { error: "No email IDs provided" },
+        { status: 400 }
+      );
+    }
+
+    // Validate array size to prevent DoS
+    if (emailIds.length > MAX_BATCH_SIZE) {
+      return NextResponse.json(
+        { error: `Cannot send more than ${MAX_BATCH_SIZE} emails at once` },
+        { status: 400 }
+      );
+    }
+
+    // Validate each ID is a valid string format
+    const invalidIds = emailIds.filter(
+      (id) => typeof id !== "string" || !CUID_REGEX.test(id)
+    );
+    if (invalidIds.length > 0) {
+      return NextResponse.json(
+        { error: "Invalid email ID format" },
         { status: 400 }
       );
     }
@@ -22,7 +45,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Get all emails to send
+    // Get all emails to send with optimistic locking via transaction
     const emails = await prisma.email.findMany({
       where: {
         id: { in: emailIds },
@@ -45,28 +68,43 @@ export async function POST(request: NextRequest) {
 
     for (const email of emails) {
       try {
-        // Send via Resend
-        const { data, error } = await resend.emails.send({
-          from: fromEmail,
-          to: email.contact.email,
-          subject: email.subject,
-          text: email.body,
-        });
-
-        if (error) {
-          // Mark as failed
-          await prisma.email.update({
+        // Use transaction to ensure atomic status updates
+        const result = await prisma.$transaction(async (tx) => {
+          // Re-check status inside transaction to prevent race conditions
+          const currentEmail = await tx.email.findUnique({
             where: { id: email.id },
-            data: { status: "failed" },
+            select: { status: true },
           });
-          results.push({
-            id: email.id,
-            success: false,
-            error: error.message,
+
+          if (currentEmail?.status !== "approved") {
+            return {
+              id: email.id,
+              success: false,
+              error: "Email status changed, skipping",
+            };
+          }
+
+          // Send via Resend
+          const { data, error } = await resend.emails.send({
+            from: fromEmail,
+            to: email.contact.email,
+            subject: email.subject,
+            text: email.body,
           });
-        } else {
-          // Mark as sent with Resend ID
-          await prisma.email.update({
+
+          if (error) {
+            await tx.email.update({
+              where: { id: email.id },
+              data: { status: "failed" },
+            });
+            return {
+              id: email.id,
+              success: false,
+              error: error.message,
+            };
+          }
+
+          await tx.email.update({
             where: { id: email.id },
             data: {
               status: "sent",
@@ -74,12 +112,15 @@ export async function POST(request: NextRequest) {
               resendId: data?.id,
             },
           });
-          results.push({
+
+          return {
             id: email.id,
             success: true,
             resendId: data?.id,
-          });
-        }
+          };
+        });
+
+        results.push(result);
       } catch (sendError) {
         console.error(`Error sending email ${email.id}:`, sendError);
         await prisma.email.update({

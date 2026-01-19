@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
+import { Prisma } from "@prisma/client";
 
 export async function PUT(
   request: NextRequest,
@@ -28,6 +29,18 @@ export async function PUT(
     return NextResponse.json({ contact });
   } catch (error) {
     console.error("Error updating contact:", error);
+
+    // Handle Prisma not found error
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2025"
+    ) {
+      return NextResponse.json(
+        { error: "Contact not found" },
+        { status: 404 }
+      );
+    }
+
     return NextResponse.json(
       { error: "Failed to update contact" },
       { status: 500 }
@@ -47,6 +60,18 @@ export async function DELETE(
     return NextResponse.json({ success: true });
   } catch (error) {
     console.error("Error deleting contact:", error);
+
+    // Handle Prisma not found error
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2025"
+    ) {
+      return NextResponse.json(
+        { error: "Contact not found" },
+        { status: 404 }
+      );
+    }
+
     return NextResponse.json(
       { error: "Failed to delete contact" },
       { status: 500 }

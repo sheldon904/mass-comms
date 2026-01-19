@@ -19,14 +19,29 @@ export async function POST(request: NextRequest) {
       where: { id: companyId },
     });
 
+    if (!company) {
+      return NextResponse.json(
+        { error: "Company not found" },
+        { status: 404 }
+      );
+    }
+
     const contact = await prisma.contact.findUnique({
       where: { id: contactId },
     });
 
-    if (!company || !contact) {
+    if (!contact) {
       return NextResponse.json(
-        { error: "Company or contact not found" },
+        { error: "Contact not found" },
         { status: 404 }
+      );
+    }
+
+    // Validate contact belongs to the company
+    if (contact.companyId !== companyId) {
+      return NextResponse.json(
+        { error: "Contact does not belong to this company" },
+        { status: 400 }
       );
     }
 

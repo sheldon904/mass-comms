@@ -5,36 +5,46 @@ export const dynamic = "force-dynamic";
 import { CompanyCard } from "@/components/company-card";
 
 async function getCompanies() {
+  // Use filtered _count to avoid fetching all email rows
   const companies = await prisma.company.findMany({
     include: {
       _count: {
-        select: { contacts: true },
-      },
-      emails: {
-        select: { status: true },
+        select: {
+          contacts: true,
+          emails: true,
+        },
       },
     },
     orderBy: { createdAt: "desc" },
   });
 
+  // Get email counts by status using groupBy (more efficient than fetching all rows)
+  const emailCounts = await prisma.email.groupBy({
+    by: ["companyId", "status"],
+    _count: { status: true },
+  });
+
+  // Build a map of company -> status -> count
+  const countMap = new Map<string, Record<string, number>>();
+  for (const row of emailCounts) {
+    if (!countMap.has(row.companyId)) {
+      countMap.set(row.companyId, { draft: 0, approved: 0, sent: 0 });
+    }
+    const counts = countMap.get(row.companyId)!;
+    counts[row.status] = row._count.status;
+  }
+
   return companies.map((company) => {
-    const emailCounts = company.emails.reduce(
-      (acc, email) => {
-        acc[email.status as keyof typeof acc] =
-          (acc[email.status as keyof typeof acc] || 0) + 1;
-        return acc;
-      },
-      { draft: 0, approved: 0, sent: 0 } as Record<string, number>
-    );
+    const counts = countMap.get(company.id) || { draft: 0, approved: 0, sent: 0 };
 
     return {
       id: company.id,
       name: company.name,
       contactCount: company._count.contacts,
       emailCounts: {
-        draft: emailCounts.draft || 0,
-        approved: emailCounts.approved || 0,
-        sent: emailCounts.sent || 0,
+        draft: counts.draft || 0,
+        approved: counts.approved || 0,
+        sent: counts.sent || 0,
       },
     };
   });

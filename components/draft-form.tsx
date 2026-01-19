@@ -67,7 +67,12 @@ export function DraftForm({ companyId, companyName, contacts }: DraftFormProps) 
         router.push("/emails");
       }, 1500);
     } catch (error) {
-      setProgress((prev) => [...prev, "Error generating drafts"]);
+      const errorMessage =
+        error instanceof Error ? error.message : "Unknown error occurred";
+      setProgress((prev) => [
+        ...prev,
+        `Error generating drafts: ${errorMessage}. Please try again.`,
+      ]);
     } finally {
       setIsGenerating(false);
     }
