@@ -3,13 +3,17 @@ import { prisma } from "@/lib/db";
 import { resend } from "@/lib/resend";
 
 const MAX_BATCH_SIZE = 100;
-// CUIDs are typically 25-28 chars, alphanumeric starting with 'c'
-const CUID_REGEX = /^c[a-z0-9]{20,30}$/;
+// CUIDs are typically 25-28 chars, alphanumeric starting with 'c' (case-insensitive)
+const CUID_REGEX = /^c[a-z0-9]{20,30}$/i;
 
 export async function POST(request: NextRequest) {
+  console.log("[SEND API] Request received");
+
   try {
     const body = await request.json();
     const { emailIds } = body;
+
+    console.log(`[SEND API] Processing ${emailIds?.length || 0} email IDs`);
 
     // Validate emailIds array
     if (!emailIds || !Array.isArray(emailIds) || emailIds.length === 0) {
@@ -39,7 +43,10 @@ export async function POST(request: NextRequest) {
     }
 
     const fromEmail = process.env.RESEND_FROM_EMAIL;
+    console.log(`[SEND API] From email configured: ${!!fromEmail}`);
+
     if (!fromEmail) {
+      console.error("[SEND API] RESEND_FROM_EMAIL not configured");
       return NextResponse.json(
         { error: "RESEND_FROM_EMAIL not configured" },
         { status: 500 }
@@ -59,15 +66,20 @@ export async function POST(request: NextRequest) {
     });
 
     if (emails.length === 0) {
+      console.log("[SEND API] No approved emails found for IDs:", emailIds);
       return NextResponse.json(
         { error: "No approved emails found" },
         { status: 400 }
       );
     }
 
+    console.log(`[SEND API] Found ${emails.length} approved emails to send`);
+
     const results = [];
 
     for (const email of emails) {
+      console.log(`[SEND API] Processing email ${email.id} to ${email.contact.email}`);
+
       try {
         // Use transaction to ensure atomic status updates
         const result = await prisma.$transaction(async (tx) => {
@@ -86,6 +98,8 @@ export async function POST(request: NextRequest) {
           }
 
           // Send via Resend
+          console.log(`[SEND API] Sending via Resend: to=${email.contact.email}, subject=${email.subject}`);
+
           const { data, error } = await resend.emails.send({
             from: fromEmail,
             to: email.contact.email,
@@ -94,6 +108,7 @@ export async function POST(request: NextRequest) {
           });
 
           if (error) {
+            console.error(`[SEND API] Resend error for ${email.id}:`, error);
             await tx.email.update({
               where: { id: email.id },
               data: { status: "failed" },
@@ -104,6 +119,8 @@ export async function POST(request: NextRequest) {
               error: error.message,
             };
           }
+
+          console.log(`[SEND API] Email sent successfully: ${email.id}, resendId: ${data?.id}`);
 
           await tx.email.update({
             where: { id: email.id },
@@ -138,6 +155,8 @@ export async function POST(request: NextRequest) {
 
     const successCount = results.filter((r) => r.success).length;
     const failCount = results.filter((r) => !r.success).length;
+
+    console.log(`[SEND API] Complete: ${successCount} sent, ${failCount} failed`);
 
     return NextResponse.json({
       results,

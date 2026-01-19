@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import {
   Loader2,
@@ -13,6 +13,7 @@ import {
   Globe,
   Phone,
   Mail,
+  Timer,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -54,7 +55,30 @@ export function ContactResearch({ companyId, companyName }: ContactResearchProps
   const [timing, setTiming] = useState<{ researchMs: number; totalMs: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [addingContact, setAddingContact] = useState<string | null>(null);
+  const [elapsedTime, setElapsedTime] = useState(0);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
   const router = useRouter();
+
+  // Timer effect for progress indicator
+  useEffect(() => {
+    if (isResearching) {
+      setElapsedTime(0);
+      timerRef.current = setInterval(() => {
+        setElapsedTime((prev) => prev + 1);
+      }, 1000);
+    } else {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+    }
+
+    return () => {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
+    };
+  }, [isResearching]);
 
   const handleResearch = async () => {
     setIsResearching(true);
@@ -192,6 +216,43 @@ export function ContactResearch({ companyId, companyName }: ContactResearchProps
             </>
           )}
         </Button>
+
+        {/* Progress indicator during research */}
+        {isResearching && (
+          <div className="space-y-3 border rounded-lg p-4 bg-muted/30">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <Timer className="h-4 w-4 text-blue-500 animate-pulse" />
+                <span>Research in progress...</span>
+              </div>
+              <div className="text-sm font-mono text-muted-foreground">
+                {elapsedTime}s
+              </div>
+            </div>
+
+            {/* Progress bar */}
+            <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
+              <div
+                className="h-full bg-blue-500 transition-all duration-1000 ease-out"
+                style={{
+                  width: `${Math.min((elapsedTime / 30) * 100, 95)}%`,
+                }}
+              />
+            </div>
+
+            <div className="text-xs text-muted-foreground space-y-1">
+              <p>
+                {elapsedTime < 5 && "Connecting to company website..."}
+                {elapsedTime >= 5 && elapsedTime < 15 && "Browsing pages for contacts..."}
+                {elapsedTime >= 15 && elapsedTime < 25 && "Extracting contact information..."}
+                {elapsedTime >= 25 && "Finalizing results..."}
+              </p>
+              <p className="text-muted-foreground/60">
+                This typically takes 10-30 seconds
+              </p>
+            </div>
+          </div>
+        )}
 
         {error && (
           <div className="flex items-start gap-2 text-sm text-destructive bg-destructive/10 p-3 rounded-md">

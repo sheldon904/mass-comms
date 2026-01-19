@@ -37,21 +37,110 @@ export interface ContactResearchParams {
 }
 
 // ============================================================================
-// WEB BROWSING UTILITIES
+// DOMAIN EXTRACTION - IMPROVED
 // ============================================================================
 
 /**
- * Fetch a webpage and extract readable text content
+ * Extract company domain from research document - IMPROVED VERSION
+ * Prioritizes actual company domains over press release sites
  */
+function extractCompanyDomain(research: string, companyName: string): string | null {
+  // Clean company name for matching
+  const cleanCompanyName = companyName
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "")
+    .replace(/(inc|llc|ltd|corp|company|co|group|holdings)$/i, "")
+    .trim();
+
+  // Domains to ALWAYS skip (press releases, social media, etc.)
+  const skipDomains = new Set([
+    "prnewswire.com", "businesswire.com", "globenewswire.com", "prweb.com",
+    "marketwatch.com", "reuters.com", "bloomberg.com", "wsj.com", "nytimes.com",
+    "forbes.com", "fortune.com", "cnbc.com", "yahoo.com", "google.com",
+    "linkedin.com", "twitter.com", "facebook.com", "instagram.com", "youtube.com",
+    "wikipedia.org", "medium.com", "substack.com", "github.com",
+    "gmail.com", "hotmail.com", "outlook.com", "aol.com", "icloud.com",
+    "sec.gov", "edgar.sec.gov", "crunchbase.com", "pitchbook.com",
+  ]);
+
+  // Extract all potential domains from the text
+  const domainMatches: { domain: string; score: number }[] = [];
+
+  // Pattern 1: Explicit website mentions (highest priority)
+  const websitePatterns = [
+    /(?:website|web site|homepage|visit us at|learn more at|visit)[:\s]+(?:https?:\/\/)?(?:www\.)?([a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?)/gi,
+    /(?:www\.)([a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?)/gi,
+  ];
+
+  for (const pattern of websitePatterns) {
+    let match;
+    while ((match = pattern.exec(research)) !== null) {
+      const domain = match[1].toLowerCase();
+      if (!skipDomains.has(domain)) {
+        // Higher score if domain contains company name
+        const containsCompanyName = domain.replace(/[^a-z0-9]/g, "").includes(cleanCompanyName);
+        domainMatches.push({
+          domain,
+          score: containsCompanyName ? 100 : 50
+        });
+      }
+    }
+  }
+
+  // Pattern 2: Email domains (high priority)
+  const emailPattern = /@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/gi;
+  let emailMatch;
+  while ((emailMatch = emailPattern.exec(research)) !== null) {
+    const domain = emailMatch[1].toLowerCase();
+    if (!skipDomains.has(domain)) {
+      const containsCompanyName = domain.replace(/[^a-z0-9]/g, "").includes(cleanCompanyName);
+      domainMatches.push({
+        domain,
+        score: containsCompanyName ? 90 : 40
+      });
+    }
+  }
+
+  // Pattern 3: URLs in text (lower priority)
+  const urlPattern = /https?:\/\/(?:www\.)?([a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?)/gi;
+  let urlMatch;
+  while ((urlMatch = urlPattern.exec(research)) !== null) {
+    const domain = urlMatch[1].toLowerCase();
+    if (!skipDomains.has(domain)) {
+      const containsCompanyName = domain.replace(/[^a-z0-9]/g, "").includes(cleanCompanyName);
+      domainMatches.push({
+        domain,
+        score: containsCompanyName ? 80 : 30
+      });
+    }
+  }
+
+  // Sort by score and return best match
+  domainMatches.sort((a, b) => b.score - a.score);
+
+  if (domainMatches.length > 0) {
+    console.log(`Domain candidates: ${JSON.stringify(domainMatches.slice(0, 5))}`);
+    return domainMatches[0].domain;
+  }
+
+  // Fallback: Try to construct domain from company name
+  const simpleDomain = cleanCompanyName + ".com";
+  console.log(`No domain found, trying fallback: ${simpleDomain}`);
+  return simpleDomain;
+}
+
+// ============================================================================
+// WEB BROWSING
+// ============================================================================
+
 async function fetchWebpage(url: string): Promise<{ success: boolean; content: string; error?: string }> {
   try {
-    // Ensure URL has protocol
     if (!url.startsWith("http://") && !url.startsWith("https://")) {
       url = "https://" + url;
     }
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+    const timeoutId = setTimeout(() => controller.abort(), 8000); // 8 second timeout
 
     const response = await fetch(url, {
       signal: controller.signal,
@@ -68,13 +157,9 @@ async function fetchWebpage(url: string): Promise<{ success: boolean; content: s
     }
 
     const html = await response.text();
-
-    // Extract text content and important elements
     const content = extractTextFromHtml(html);
-
-    // Limit content size to avoid token limits
-    const truncated = content.length > 15000
-      ? content.substring(0, 15000) + "\n...[truncated]"
+    const truncated = content.length > 12000
+      ? content.substring(0, 12000) + "\n...[truncated]"
       : content;
 
     return { success: true, content: truncated };
@@ -84,16 +169,20 @@ async function fetchWebpage(url: string): Promise<{ success: boolean; content: s
   }
 }
 
-/**
- * Extract readable text from HTML, preserving structure
- */
 function extractTextFromHtml(html: string): string {
-  // Remove script and style tags
   let text = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "");
   text = text.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "");
   text = text.replace(/<noscript[^>]*>[\s\S]*?<\/noscript>/gi, "");
 
-  // Extract links (important for finding team/contact pages)
+  // Extract emails
+  const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+  const emails = html.match(emailRegex) || [];
+
+  // Extract phone numbers
+  const phoneRegex = /(?:\+?1[-.\s]?)?\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}/g;
+  const phones = html.match(phoneRegex) || [];
+
+  // Extract links for navigation
   const links: string[] = [];
   const linkRegex = /<a[^>]+href=["']([^"']+)["'][^>]*>([^<]*)<\/a>/gi;
   let match;
@@ -105,14 +194,6 @@ function extractTextFromHtml(html: string): string {
     }
   }
 
-  // Extract emails directly from HTML
-  const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
-  const emails = html.match(emailRegex) || [];
-
-  // Extract phone numbers
-  const phoneRegex = /(?:\+?1[-.\s]?)?\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}/g;
-  const phones = html.match(phoneRegex) || [];
-
   // Convert HTML to text
   text = text.replace(/<br\s*\/?>/gi, "\n");
   text = text.replace(/<\/p>/gi, "\n\n");
@@ -120,22 +201,17 @@ function extractTextFromHtml(html: string): string {
   text = text.replace(/<\/h[1-6]>/gi, "\n\n");
   text = text.replace(/<li[^>]*>/gi, "\n• ");
   text = text.replace(/<[^>]+>/g, " ");
-
-  // Decode HTML entities
   text = text.replace(/&nbsp;/g, " ");
   text = text.replace(/&amp;/g, "&");
   text = text.replace(/&lt;/g, "<");
   text = text.replace(/&gt;/g, ">");
   text = text.replace(/&quot;/g, '"');
   text = text.replace(/&#39;/g, "'");
-
-  // Clean up whitespace
   text = text.replace(/\s+/g, " ");
   text = text.replace(/\n\s+/g, "\n");
   text = text.trim();
 
-  // Compile the result
-  let result = "=== PAGE CONTENT ===\n" + text;
+  let result = "=== PAGE CONTENT ===\n" + text.substring(0, 8000);
 
   if (emails.length > 0) {
     result += "\n\n=== EMAILS FOUND ===\n" + Array.from(new Set(emails)).join("\n");
@@ -145,62 +221,20 @@ function extractTextFromHtml(html: string): string {
     result += "\n\n=== PHONE NUMBERS FOUND ===\n" + Array.from(new Set(phones)).join("\n");
   }
 
-  if (links.length > 0) {
-    // Filter to relevant links
-    const relevantLinks = links.filter(link => {
-      const lower = link.toLowerCase();
-      return lower.includes("team") || lower.includes("about") ||
-             lower.includes("contact") || lower.includes("leadership") ||
-             lower.includes("staff") || lower.includes("people") ||
-             lower.includes("management") || lower.includes("executive") ||
-             lower.includes("who we are") || lower.includes("our team");
-    });
+  // Filter to relevant links
+  const relevantLinks = links.filter(link => {
+    const lower = link.toLowerCase();
+    return lower.includes("team") || lower.includes("about") ||
+           lower.includes("contact") || lower.includes("leadership") ||
+           lower.includes("staff") || lower.includes("people") ||
+           lower.includes("management") || lower.includes("executive");
+  });
 
-    if (relevantLinks.length > 0) {
-      result += "\n\n=== RELEVANT LINKS ===\n" + relevantLinks.slice(0, 20).join("\n");
-    }
+  if (relevantLinks.length > 0) {
+    result += "\n\n=== RELEVANT LINKS ===\n" + relevantLinks.slice(0, 15).join("\n");
   }
 
   return result;
-}
-
-/**
- * Extract domain from URL or email
- */
-function extractDomainFromText(text: string): string | null {
-  // Try to find domain from URLs
-  const urlRegex = /(?:https?:\/\/)?(?:www\.)?([a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?)/gi;
-  const urlMatches = Array.from(text.matchAll(urlRegex));
-
-  // Try to find domain from email addresses
-  const emailRegex = /@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/gi;
-  const emailMatches = Array.from(text.matchAll(emailRegex));
-
-  const domains = new Set<string>();
-
-  // Common domains to filter out
-  const commonDomains = [
-    "gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "aol.com",
-    "icloud.com", "mail.com", "protonmail.com", "linkedin.com", "twitter.com",
-    "facebook.com", "github.com", "google.com", "microsoft.com", "apple.com",
-    "wikipedia.org", "medium.com", "youtube.com", "instagram.com"
-  ];
-
-  for (const match of urlMatches) {
-    const domain = match[1].toLowerCase();
-    if (!commonDomains.includes(domain)) {
-      domains.add(domain);
-    }
-  }
-
-  for (const match of emailMatches) {
-    const domain = match[1].toLowerCase();
-    if (!commonDomains.includes(domain)) {
-      domains.add(domain);
-    }
-  }
-
-  return domains.size > 0 ? Array.from(domains)[0] : null;
 }
 
 // ============================================================================
@@ -228,43 +262,41 @@ async function verifyEmailDomain(email: string): Promise<boolean> {
   }
 }
 
+async function verifyDomainExists(domain: string): Promise<boolean> {
+  if (mxCache.has(domain)) {
+    return mxCache.get(domain)!;
+  }
+
+  try {
+    const records = await resolveMx(domain);
+    const exists = records && records.length > 0;
+    mxCache.set(domain, exists);
+    return exists;
+  } catch {
+    mxCache.set(domain, false);
+    return false;
+  }
+}
+
 // ============================================================================
-// AGENTIC RESEARCH SYSTEM
+// SIMPLIFIED AGENTIC RESEARCH
 // ============================================================================
 
-/**
- * Define the tools available to the agent
- */
 const agentTools: Anthropic.Tool[] = [
   {
     name: "browse_webpage",
-    description: `Fetch and read the content of a webpage. Returns the text content, any email addresses found, phone numbers found, and relevant links (team, about, contact pages).
-
-Use this to:
-1. Browse the company homepage to find team/contact page links
-2. Browse team/about/contact pages to find actual contact information
-3. Browse individual staff profile pages if available
-
-The tool will extract emails and phone numbers automatically from the page.`,
+    description: "Fetch and read a webpage. Returns text content, emails, phones, and relevant links.",
     input_schema: {
       type: "object" as const,
       properties: {
-        url: {
-          type: "string",
-          description: "The URL to fetch (e.g., 'https://example.com/team' or 'example.com/about')"
-        }
+        url: { type: "string", description: "The URL to fetch" }
       },
       required: ["url"]
     }
   },
   {
     name: "submit_contacts",
-    description: `Submit the discovered contacts. Call this when you have found contacts with REAL email addresses (not generated patterns).
-
-IMPORTANT:
-- Only submit contacts where you found an ACTUAL email on the website
-- Include phone numbers if found
-- Do NOT make up or guess emails - only use emails you actually found on the pages you browsed`,
+    description: "Submit discovered contacts. Only use REAL emails found on pages, never generate patterns.",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -273,26 +305,11 @@ IMPORTANT:
           items: {
             type: "object",
             properties: {
-              name: {
-                type: "string",
-                description: "Full name of the person"
-              },
-              email: {
-                type: "string",
-                description: "Email address found on the website (must be real, not generated)"
-              },
-              phone: {
-                type: ["string", "null"],
-                description: "Phone number if found, null otherwise"
-              },
-              role: {
-                type: "string",
-                description: "Job title or role"
-              },
-              source_url: {
-                type: "string",
-                description: "The URL where this contact info was found"
-              }
+              name: { type: "string" },
+              email: { type: "string" },
+              phone: { type: ["string", "null"] },
+              role: { type: "string" },
+              source_url: { type: "string" }
             },
             required: ["name", "email", "role", "source_url"]
           }
@@ -303,45 +320,9 @@ IMPORTANT:
   }
 ];
 
-/**
- * Execute a tool call from the agent
- */
-async function executeTool(
-  toolName: string,
-  toolInput: Record<string, unknown>,
-  pagesVisited: string[]
-): Promise<string> {
-  if (toolName === "browse_webpage") {
-    const url = toolInput.url as string;
-    pagesVisited.push(url);
-
-    console.log(`Agent browsing: ${url}`);
-    const result = await fetchWebpage(url);
-
-    if (result.success) {
-      return result.content;
-    } else {
-      return `Error fetching page: ${result.error}`;
-    }
-  }
-
-  if (toolName === "submit_contacts") {
-    // This is handled in the main loop
-    return "Contacts submitted successfully.";
-  }
-
-  return "Unknown tool";
-}
-
-/**
- * Run the agentic research loop
- */
-export async function researchContacts(
-  params: ContactResearchParams
-): Promise<ResearchResult> {
+export async function researchContacts(params: ContactResearchParams): Promise<ResearchResult> {
   const startTime = Date.now();
   const { companyName, companyResearch } = params;
-
   const pagesVisited: string[] = [];
   let finalContacts: DiscoveredContact[] = [];
 
@@ -355,54 +336,53 @@ export async function researchContacts(
     };
   }
 
+  // Extract and verify company domain FIRST
+  const domain = params.companyDomain || extractCompanyDomain(companyResearch, companyName);
+  console.log(`Extracted domain for ${companyName}: ${domain}`);
+
+  if (!domain) {
+    return {
+      contacts: [],
+      summary: `Could not determine website for ${companyName}`,
+      stages: { pagesVisited: [], contactsFound: 0, emailsVerified: 0, phonesFound: 0 },
+      durationMs: Date.now() - startTime
+    };
+  }
+
+  // Verify domain exists before browsing
+  const domainExists = await verifyDomainExists(domain);
+  if (!domainExists) {
+    console.log(`Domain ${domain} does not have MX records, might not exist`);
+  }
+
   const anthropic = new Anthropic({ apiKey });
 
-  // Extract domain from research document
-  const domain = params.companyDomain || extractDomainFromText(companyResearch);
+  const systemPrompt = `You are a contact research agent. Find REAL contact info by browsing the company website.
 
-  // Build the initial prompt for the agent
-  const systemPrompt = `You are a contact research agent. Your job is to find REAL contact information (emails, phone numbers) for key people at a company by browsing their website.
+RULES:
+1. ONLY browse the company domain: ${domain}
+2. Start at the homepage, find team/about/contact pages
+3. Extract REAL emails and phones from pages - NEVER guess or generate patterns
+4. You have MAX 4 page visits - be strategic
+5. Submit contacts when you have real data
 
-CRITICAL RULES:
-1. You must find ACTUAL emails on the website - NEVER make up or guess email patterns
-2. Start by browsing the company homepage to find links to team/about/contact pages
-3. Browse those pages to find contact information
-4. Look for leadership, executives, key staff members
-5. Extract real emails and phone numbers that are displayed on the pages
-6. You have a maximum of 6 page visits - be strategic
-7. When you've found contacts with real emails, use submit_contacts to finish
-
-WHAT TO LOOK FOR:
-- Team pages, About Us pages, Contact pages, Leadership pages
-- Staff directories, Executive bios
-- Email addresses displayed on the page (the tool will highlight these)
-- Phone numbers displayed on the page
-
-WHAT NOT TO DO:
-- Don't guess email patterns like first.last@domain.com
-- Don't make up contact information
-- Don't spend all visits on irrelevant pages`;
+DO NOT:
+- Browse other domains
+- Make up email addresses
+- Guess email patterns`;
 
   const userPrompt = `Research contacts for: ${companyName}
+Website: https://${domain}
 
-Company Website Domain: ${domain || "Unknown - try to find it"}
+Start by browsing the homepage at https://${domain} and find their team/contact pages.
+Extract real email addresses and phone numbers for key contacts.`;
 
-Research Document (may contain useful context):
----
-${companyResearch.substring(0, 3000)}
----
-
-Start by browsing the company website${domain ? ` at ${domain}` : ""}. Find team/about/contact pages and extract REAL email addresses and phone numbers for key contacts.
-
-Remember: Only submit contacts with REAL emails you found on their website. Do not generate email patterns.`;
-
-  // Initialize conversation
   const messages: Anthropic.MessageParam[] = [
     { role: "user", content: userPrompt }
   ];
 
-  // Agentic loop - max 8 iterations
-  const maxIterations = 8;
+  // Simplified agentic loop - max 5 iterations, 25s timeout
+  const maxIterations = 5;
   let iteration = 0;
   let shouldContinue = true;
 
@@ -410,42 +390,39 @@ Remember: Only submit contacts with REAL emails you found on their website. Do n
     iteration++;
     console.log(`Agent iteration ${iteration}...`);
 
+    // Check timeout (25 seconds)
+    if (Date.now() - startTime > 25000) {
+      console.log("Agent timeout - returning partial results");
+      break;
+    }
+
     try {
       const response = await anthropic.messages.create({
         model: "claude-sonnet-4-20250514",
-        max_tokens: 2048,
+        max_tokens: 1500,
         system: systemPrompt,
         tools: agentTools,
         messages
       });
 
-      // Check for tool use
       const toolUseBlocks = response.content.filter(
         (block): block is Anthropic.ToolUseBlock => block.type === "tool_use"
       );
 
       if (toolUseBlocks.length === 0) {
-        // No tool use - agent is done or stuck
-        console.log("Agent finished without tool use");
         shouldContinue = false;
         break;
       }
 
-      // Process tool calls
       const toolResults: Anthropic.ToolResultBlockParam[] = [];
 
       for (const toolUse of toolUseBlocks) {
         if (toolUse.name === "submit_contacts") {
-          // Agent is submitting contacts - we're done
           const input = toolUse.input as { contacts: Array<{
-            name: string;
-            email: string;
-            phone?: string | null;
-            role: string;
-            source_url: string;
+            name: string; email: string; phone?: string | null;
+            role: string; source_url: string;
           }> };
 
-          // Verify emails and build final contacts
           for (const contact of input.contacts || []) {
             const verified = await verifyEmailDomain(contact.email);
             finalContacts.push({
@@ -462,58 +439,54 @@ Remember: Only submit contacts with REAL emails you found on their website. Do n
           toolResults.push({
             type: "tool_result",
             tool_use_id: toolUse.id,
-            content: "Contacts submitted successfully."
+            content: "Contacts submitted."
           });
-
           shouldContinue = false;
-        } else {
-          // Execute other tools
-          const result = await executeTool(
-            toolUse.name,
-            toolUse.input as Record<string, unknown>,
-            pagesVisited
-          );
+        } else if (toolUse.name === "browse_webpage") {
+          const input = toolUse.input as { url: string };
+          let url = input.url;
+
+          // Security: Only allow browsing the company domain
+          const urlDomain = url.replace(/^https?:\/\//, "").replace(/^www\./, "").split("/")[0];
+          if (!urlDomain.includes(domain.replace("www.", ""))) {
+            console.log(`Blocked browse to different domain: ${url}`);
+            toolResults.push({
+              type: "tool_result",
+              tool_use_id: toolUse.id,
+              content: `Error: Can only browse ${domain}. Try a URL on that domain.`
+            });
+            continue;
+          }
+
+          pagesVisited.push(url);
+          console.log(`Browsing: ${url}`);
+          const result = await fetchWebpage(url);
 
           toolResults.push({
             type: "tool_result",
             tool_use_id: toolUse.id,
-            content: result
+            content: result.success ? result.content : `Error: ${result.error}`
           });
         }
       }
 
-      // Add assistant message and tool results to conversation
       messages.push({ role: "assistant", content: response.content });
       messages.push({ role: "user", content: toolResults });
-
-      // Check if we hit stop reason
-      if (response.stop_reason === "end_turn" && toolUseBlocks.length === 0) {
-        shouldContinue = false;
-      }
 
     } catch (error) {
       console.error("Agent error:", error);
       shouldContinue = false;
     }
-
-    // Check timeout (40 seconds max)
-    if (Date.now() - startTime > 40000) {
-      console.log("Agent timeout reached");
-      shouldContinue = false;
-    }
   }
 
-  // Build result
   const durationMs = Date.now() - startTime;
   const phonesFound = finalContacts.filter(c => c.phone).length;
   const emailsVerified = finalContacts.filter(c => c.verified).length;
 
   let summary = `Found ${finalContacts.length} contact(s) for ${companyName}. `;
-  summary += `Browsed ${pagesVisited.length} page(s). `;
-  summary += `${emailsVerified} email(s) verified. `;
-  if (phonesFound > 0) {
-    summary += `${phonesFound} phone number(s) found.`;
-  }
+  summary += `Browsed ${pagesVisited.length} page(s) on ${domain}. `;
+  if (emailsVerified > 0) summary += `${emailsVerified} verified. `;
+  if (phonesFound > 0) summary += `${phonesFound} phone(s).`;
 
   return {
     contacts: finalContacts.slice(0, 10),
