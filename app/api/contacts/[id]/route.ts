@@ -8,7 +8,7 @@ export async function PUT(
 ) {
   try {
     const body = await request.json();
-    const { name, email, role } = body;
+    const { name, email, phone, role } = body;
 
     if (!name || !email) {
       return NextResponse.json(
@@ -22,6 +22,7 @@ export async function PUT(
       data: {
         name,
         email,
+        phone: phone || null,
         role: role || null,
       },
     });

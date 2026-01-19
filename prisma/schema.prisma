@@ -23,6 +23,7 @@ model Contact {
   id        String   @id @default(cuid())
   name      String
   email     String
+  phone     String?
   role      String?
   companyId String
   company   Company  @relation(fields: [companyId], references: [id], onDelete: Cascade)

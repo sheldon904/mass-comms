@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, Plus, Trash2, Pencil, X, Check } from "lucide-react";
+import { Loader2, Plus, Trash2, Pencil, X, Check, Phone } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -11,6 +11,7 @@ interface Contact {
   id: string;
   name: string;
   email: string;
+  phone: string | null;
   role: string | null;
 }
 
@@ -29,12 +30,14 @@ export function ContactForm({ companyId, contacts }: ContactFormProps) {
   const [newContact, setNewContact] = useState({
     name: "",
     email: "",
+    phone: "",
     role: "",
   });
 
   const [editContact, setEditContact] = useState({
     name: "",
     email: "",
+    phone: "",
     role: "",
   });
 
@@ -48,6 +51,7 @@ export function ContactForm({ companyId, contacts }: ContactFormProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...newContact,
+          phone: newContact.phone || null,
           companyId,
         }),
       });
@@ -56,7 +60,7 @@ export function ContactForm({ companyId, contacts }: ContactFormProps) {
 
       const { contact } = await response.json();
       setLocalContacts((prev) => [...prev, contact]);
-      setNewContact({ name: "", email: "", role: "" });
+      setNewContact({ name: "", email: "", phone: "", role: "" });
       setIsAdding(false);
       router.refresh();
     } catch (error) {
@@ -74,7 +78,10 @@ export function ContactForm({ companyId, contacts }: ContactFormProps) {
       const response = await fetch(`/api/contacts/${id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(editContact),
+        body: JSON.stringify({
+          ...editContact,
+          phone: editContact.phone || null,
+        }),
       });
 
       if (!response.ok) throw new Error("Failed to update contact");
@@ -117,6 +124,7 @@ export function ContactForm({ companyId, contacts }: ContactFormProps) {
     setEditContact({
       name: contact.name,
       email: contact.email,
+      phone: contact.phone || "",
       role: contact.role || "",
     });
   };
@@ -131,7 +139,7 @@ export function ContactForm({ companyId, contacts }: ContactFormProps) {
               className="flex items-center justify-between p-3 bg-muted rounded-lg"
             >
               {editingId === contact.id ? (
-                <div className="flex-1 grid grid-cols-3 gap-2 mr-2">
+                <div className="flex-1 grid grid-cols-2 md:grid-cols-4 gap-2 mr-2">
                   <Input
                     value={editContact.name}
                     onChange={(e) =>
@@ -147,11 +155,18 @@ export function ContactForm({ companyId, contacts }: ContactFormProps) {
                     placeholder="Email"
                   />
                   <Input
+                    value={editContact.phone}
+                    onChange={(e) =>
+                      setEditContact((prev) => ({ ...prev, phone: e.target.value }))
+                    }
+                    placeholder="Phone"
+                  />
+                  <Input
                     value={editContact.role}
                     onChange={(e) =>
                       setEditContact((prev) => ({ ...prev, role: e.target.value }))
                     }
-                    placeholder="Role (optional)"
+                    placeholder="Role"
                   />
                 </div>
               ) : (
@@ -161,6 +176,12 @@ export function ContactForm({ companyId, contacts }: ContactFormProps) {
                     {contact.email}
                     {contact.role && ` • ${contact.role}`}
                   </p>
+                  {contact.phone && (
+                    <p className="text-xs text-muted-foreground flex items-center gap-1">
+                      <Phone className="h-3 w-3" />
+                      {contact.phone}
+                    </p>
+                  )}
                 </div>
               )}
               <div className="flex items-center gap-1">
@@ -221,7 +242,7 @@ export function ContactForm({ companyId, contacts }: ContactFormProps) {
 
       {isAdding ? (
         <div className="border rounded-lg p-4 space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label htmlFor="name">Name *</Label>
               <Input
@@ -246,6 +267,18 @@ export function ContactForm({ companyId, contacts }: ContactFormProps) {
               />
             </div>
             <div className="space-y-2">
+              <Label htmlFor="phone">Phone (optional)</Label>
+              <Input
+                id="phone"
+                type="tel"
+                value={newContact.phone}
+                onChange={(e) =>
+                  setNewContact((prev) => ({ ...prev, phone: e.target.value }))
+                }
+                placeholder="(555) 123-4567"
+              />
+            </div>
+            <div className="space-y-2">
               <Label htmlFor="role">Role (optional)</Label>
               <Input
                 id="role"
@@ -262,7 +295,7 @@ export function ContactForm({ companyId, contacts }: ContactFormProps) {
               variant="outline"
               onClick={() => {
                 setIsAdding(false);
-                setNewContact({ name: "", email: "", role: "" });
+                setNewContact({ name: "", email: "", phone: "", role: "" });
               }}
             >
               Cancel

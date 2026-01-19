@@ -2,8 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { researchContacts } from "@/lib/contact-research-agent";
 
-// Vercel serverless timeout - keep well under 60s
-export const maxDuration = 30;
+// Vercel serverless timeout - agent needs more time for web browsing
+export const maxDuration = 55;
 
 export async function POST(request: NextRequest) {
   const startTime = Date.now();

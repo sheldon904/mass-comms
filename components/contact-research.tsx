@@ -10,7 +10,8 @@ import {
   CheckCircle,
   AlertCircle,
   Clock,
-  Brain,
+  Globe,
+  Phone,
   Mail,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -26,6 +27,7 @@ import { Badge } from "@/components/ui/badge";
 interface DiscoveredContact {
   name: string;
   email: string;
+  phone: string | null;
   role: string;
   confidence: "high" | "medium" | "low";
   source: string;
@@ -33,9 +35,10 @@ interface DiscoveredContact {
 }
 
 interface ResearchStages {
-  aiExtraction: { found: number; method: string };
-  verification: { verified: number; failed: number };
-  emailGeneration?: { generated: number };
+  pagesVisited: string[];
+  contactsFound: number;
+  emailsVerified: number;
+  phonesFound: number;
 }
 
 interface ContactResearchProps {
@@ -95,6 +98,7 @@ export function ContactResearch({ companyId, companyName }: ContactResearchProps
         body: JSON.stringify({
           name: contact.name,
           email: contact.email,
+          phone: contact.phone,
           role: contact.role,
           companyId,
         }),
@@ -129,6 +133,7 @@ export function ContactResearch({ companyId, companyName }: ContactResearchProps
           body: JSON.stringify({
             name: contact.name,
             email: contact.email,
+            phone: contact.phone,
             role: contact.role,
             companyId,
           }),
@@ -178,7 +183,7 @@ export function ContactResearch({ companyId, companyName }: ContactResearchProps
           {isResearching ? (
             <>
               <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              Analyzing with AI...
+              Researching website...
             </>
           ) : (
             <>
@@ -197,35 +202,52 @@ export function ContactResearch({ companyId, companyName }: ContactResearchProps
 
         {/* Research Stages Summary */}
         {stages && (
-          <div className="space-y-2 text-sm border rounded-lg p-3 bg-muted/50">
-            <div className="font-medium text-xs uppercase text-muted-foreground mb-2">
+          <div className="space-y-3 text-sm border rounded-lg p-3 bg-muted/50">
+            <div className="font-medium text-xs uppercase text-muted-foreground">
               Research Summary
             </div>
+
             <div className="flex items-center gap-2 text-muted-foreground">
-              <Brain className="h-4 w-4 text-purple-500" />
+              <Globe className="h-4 w-4 text-blue-500" />
+              <span>Browsed {stages.pagesVisited.length} page(s)</span>
+            </div>
+
+            <div className="flex items-center gap-2 text-muted-foreground">
+              <Mail className="h-4 w-4 text-purple-500" />
               <span>
-                AI extracted {stages.aiExtraction.found} people
-                <span className="text-xs ml-1">({stages.aiExtraction.method})</span>
+                Found {stages.contactsFound} contact(s), {stages.emailsVerified} verified
               </span>
             </div>
-            <div className="flex items-center gap-2 text-muted-foreground">
-              <CheckCircle className="h-4 w-4 text-green-500" />
-              <span>
-                {stages.verification.verified} verified, {stages.verification.failed} unverified
-              </span>
-            </div>
-            {stages.emailGeneration && (
+
+            {stages.phonesFound > 0 && (
               <div className="flex items-center gap-2 text-muted-foreground">
-                <Mail className="h-4 w-4 text-blue-500" />
-                <span>
-                  {stages.emailGeneration.generated} email(s) generated from verified domain
-                </span>
+                <Phone className="h-4 w-4 text-green-500" />
+                <span>{stages.phonesFound} phone number(s) found</span>
               </div>
             )}
+
             {timing && (
               <div className="flex items-center gap-2 text-muted-foreground">
                 <Clock className="h-4 w-4" />
                 <span>Completed in {(timing.totalMs / 1000).toFixed(1)}s</span>
+              </div>
+            )}
+
+            {stages.pagesVisited.length > 0 && (
+              <div className="mt-2 pt-2 border-t">
+                <div className="text-xs text-muted-foreground mb-1">Pages visited:</div>
+                <div className="space-y-1">
+                  {stages.pagesVisited.slice(0, 5).map((url, i) => (
+                    <div key={i} className="text-xs text-muted-foreground/70 truncate">
+                      • {url}
+                    </div>
+                  ))}
+                  {stages.pagesVisited.length > 5 && (
+                    <div className="text-xs text-muted-foreground/50">
+                      ...and {stages.pagesVisited.length - 5} more
+                    </div>
+                  )}
+                </div>
               </div>
             )}
           </div>
@@ -282,10 +304,17 @@ export function ContactResearch({ companyId, companyName }: ContactResearchProps
                     )}
                   </div>
                   <p className="text-sm text-muted-foreground">{contact.role}</p>
-                  <p className="text-xs text-muted-foreground truncate">
-                    {contact.email}
-                  </p>
-                  <p className="text-xs text-muted-foreground/70">
+                  <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                    <Mail className="h-3 w-3" />
+                    <span className="truncate">{contact.email}</span>
+                  </div>
+                  {contact.phone && (
+                    <div className="flex items-center gap-1 text-xs text-muted-foreground">
+                      <Phone className="h-3 w-3" />
+                      <span>{contact.phone}</span>
+                    </div>
+                  )}
+                  <p className="text-xs text-muted-foreground/70 truncate">
                     Source: {contact.source}
                   </p>
                 </div>
@@ -311,9 +340,9 @@ export function ContactResearch({ companyId, companyName }: ContactResearchProps
 
         {results && results.length === 0 && !error && (
           <div className="text-sm text-muted-foreground text-center py-4 bg-muted rounded-md">
-            <p>No contacts discovered in the research document.</p>
+            <p>No contacts discovered on the company website.</p>
             <p className="text-xs mt-1">
-              The document may not contain identifiable people with names.
+              The website may not have publicly listed contact information.
             </p>
           </div>
         )}
