@@ -2,9 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import { researchContacts } from "@/lib/contact-research-agent";
 
-export const maxDuration = 60; // Allow up to 60 seconds for research
+// Vercel serverless timeout - keep well under 60s
+export const maxDuration = 30;
 
 export async function POST(request: NextRequest) {
+  const startTime = Date.now();
+
   try {
     const body = await request.json();
     const { companyId } = body;
@@ -34,27 +37,37 @@ export async function POST(request: NextRequest) {
     );
     const companyDomain = domainMatch ? domainMatch[1] : undefined;
 
-    // Run the research agent
+    // Run the efficient research (should complete in <30s)
     const result = await researchContacts({
       companyName: company.name,
       companyResearch: company.research,
       companyDomain,
     });
 
+    const totalDuration = Date.now() - startTime;
+
     return NextResponse.json({
       success: true,
       companyId,
       companyName: company.name,
-      discoveredContacts: result.contacts,
+      contacts: result.contacts,
       summary: result.summary,
-      searchesPerformed: result.searchesPerformed,
+      stages: result.stages,
+      timing: {
+        researchMs: result.durationMs,
+        totalMs: totalDuration,
+      },
     });
   } catch (error) {
     console.error("Error researching contacts:", error);
+
+    // Return partial results if available
     return NextResponse.json(
       {
-        error:
-          error instanceof Error ? error.message : "Failed to research contacts",
+        success: false,
+        error: error instanceof Error ? error.message : "Failed to research contacts",
+        contacts: [],
+        summary: "Research failed - please try again",
       },
       { status: 500 }
     );

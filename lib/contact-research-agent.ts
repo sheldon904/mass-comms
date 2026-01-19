@@ -1,419 +1,513 @@
 import Anthropic from "@anthropic-ai/sdk";
+import dns from "dns";
+import { promisify } from "util";
 
-interface ContactResearchParams {
-  companyName: string;
-  companyResearch: string;
-  companyDomain?: string;
-}
+const resolveMx = promisify(dns.resolveMx);
 
-interface DiscoveredContact {
+// ============================================================================
+// TYPES
+// ============================================================================
+
+export interface DiscoveredContact {
   name: string;
   email: string;
   role: string;
   confidence: "high" | "medium" | "low";
   source: string;
+  verified: boolean;
 }
 
-interface ResearchResult {
+export interface ResearchResult {
   contacts: DiscoveredContact[];
   summary: string;
-  searchesPerformed: string[];
+  stages: {
+    documentParsing: { found: number; emails: string[] };
+    verification: { verified: number; failed: number };
+    aiAnalysis?: { used: boolean; reason: string };
+  };
+  durationMs: number;
 }
 
-// Tool definitions for the research agent
-const tools: Anthropic.Tool[] = [
-  {
-    name: "analyze_company_research",
-    description:
-      "Analyze the company research document to extract key information like company domain, leadership structure, and target departments",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        research_text: {
-          type: "string",
-          description: "The company research text to analyze",
-        },
-      },
-      required: ["research_text"],
-    },
-  },
-  {
-    name: "identify_key_roles",
-    description:
-      "Identify the key roles/positions at a company that would be valuable to contact based on the outreach purpose",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        company_name: {
-          type: "string",
-          description: "Name of the company",
-        },
-        industry: {
-          type: "string",
-          description: "Industry the company operates in",
-        },
-        target_departments: {
-          type: "array",
-          items: { type: "string" },
-          description:
-            "Departments to target (e.g., Engineering, Marketing, Sales)",
-        },
-      },
-      required: ["company_name"],
-    },
-  },
-  {
-    name: "generate_email_patterns",
-    description:
-      "Generate likely email address patterns for a company based on its domain",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        domain: {
-          type: "string",
-          description: "Company email domain (e.g., company.com)",
-        },
-        person_name: {
-          type: "string",
-          description: "Full name of the person (e.g., John Smith)",
-        },
-      },
-      required: ["domain", "person_name"],
-    },
-  },
-  {
-    name: "search_web",
-    description:
-      "Search the web for information about company contacts, leadership, or email addresses",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        query: {
-          type: "string",
-          description: "Search query to find contact information",
-        },
-      },
-      required: ["query"],
-    },
-  },
-  {
-    name: "compile_contacts",
-    description:
-      "Compile the final list of discovered contacts with their details",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        contacts: {
-          type: "array",
-          items: {
-            type: "object",
-            properties: {
-              name: { type: "string" },
-              email: { type: "string" },
-              role: { type: "string" },
-              confidence: { type: "string", enum: ["high", "medium", "low"] },
-              source: { type: "string" },
-            },
-            required: ["name", "email", "role", "confidence", "source"],
-          },
-          description: "List of discovered contacts",
-        },
-        summary: {
-          type: "string",
-          description: "Summary of the research performed",
-        },
-      },
-      required: ["contacts", "summary"],
-    },
-  },
-];
-
-// Simulated tool implementations
-function executeAnalyzeCompanyResearch(researchText: string): string {
-  // Extract domain from research if present
-  const domainMatch = researchText.match(
-    /(?:website|domain|url)[:\s]+(?:https?:\/\/)?(?:www\.)?([a-zA-Z0-9-]+\.[a-zA-Z]{2,})/i
-  );
-  const domain = domainMatch ? domainMatch[1] : null;
-
-  // Look for mentioned people
-  const namePatterns = researchText.match(
-    /(?:CEO|CTO|CFO|VP|Director|Manager|Head of|Chief)[:\s]+([A-Z][a-z]+ [A-Z][a-z]+)/gi
-  );
-  const mentionedPeople = namePatterns
-    ? Array.from(new Set(namePatterns))
-    : [];
-
-  // Look for email patterns already in the research
-  const emailMatches = researchText.match(
-    /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi
-  );
-  const existingEmails = emailMatches ? Array.from(new Set(emailMatches)) : [];
-
-  return JSON.stringify({
-    extractedDomain: domain,
-    mentionedPeople,
-    existingEmails,
-    companySize: researchText.includes("enterprise")
-      ? "enterprise"
-      : researchText.includes("startup")
-        ? "startup"
-        : "mid-market",
-    keyTopics: extractKeyTopics(researchText),
-  });
+interface ExtractedPerson {
+  name: string;
+  role: string;
+  email?: string;
 }
 
-function extractKeyTopics(text: string): string[] {
-  const topics: string[] = [];
-  const keywords = [
-    "AI",
-    "machine learning",
-    "SaaS",
-    "fintech",
-    "healthcare",
-    "e-commerce",
-    "B2B",
-    "B2C",
-    "enterprise",
-    "startup",
-    "cloud",
-    "security",
-    "data",
-    "analytics",
-  ];
-  for (const keyword of keywords) {
-    if (text.toLowerCase().includes(keyword.toLowerCase())) {
-      topics.push(keyword);
+// ============================================================================
+// STAGE 1: DOCUMENT PARSING (No API calls - pure regex/parsing)
+// ============================================================================
+
+/**
+ * Extract all email addresses from text
+ */
+function extractEmails(text: string): string[] {
+  const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
+  const matches = text.match(emailRegex);
+  return matches ? Array.from(new Set(matches.map((e) => e.toLowerCase()))) : [];
+}
+
+/**
+ * Extract company domain from text (URLs or email addresses)
+ */
+function extractDomain(text: string, companyName: string): string | null {
+  // Try to find domain from URLs
+  const urlRegex = /(?:https?:\/\/)?(?:www\.)?([a-zA-Z0-9-]+\.[a-zA-Z]{2,})(?:\/|$)/gi;
+  const urlMatches = Array.from(text.matchAll(urlRegex));
+
+  // Try to find domain from email addresses
+  const emailRegex = /@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/gi;
+  const emailMatches = Array.from(text.matchAll(emailRegex));
+
+  const domains = new Set<string>();
+
+  for (const match of urlMatches) {
+    const domain = match[1].toLowerCase();
+    // Filter out common non-company domains
+    if (!isCommonDomain(domain)) {
+      domains.add(domain);
     }
   }
-  return topics;
+
+  for (const match of emailMatches) {
+    const domain = match[1].toLowerCase();
+    if (!isCommonDomain(domain)) {
+      domains.add(domain);
+    }
+  }
+
+  // Try to match company name to domain
+  const normalizedCompany = companyName.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const domainArray = Array.from(domains);
+  for (const domain of domainArray) {
+    if (domain.includes(normalizedCompany) || normalizedCompany.includes(domain.split(".")[0])) {
+      return domain;
+    }
+  }
+
+  // Return first non-common domain found
+  return domainArray.length > 0 ? domainArray[0] : null;
 }
 
-function executeIdentifyKeyRoles(
-  companyName: string,
-  industry?: string,
-  targetDepartments?: string[]
-): string {
-  const defaultRoles = [
-    { title: "CEO", department: "Executive", priority: "high" },
-    { title: "CTO", department: "Technology", priority: "high" },
-    { title: "VP of Engineering", department: "Engineering", priority: "medium" },
-    { title: "VP of Sales", department: "Sales", priority: "medium" },
-    { title: "VP of Marketing", department: "Marketing", priority: "medium" },
-    { title: "Head of Product", department: "Product", priority: "medium" },
-    { title: "Director of Business Development", department: "Sales", priority: "medium" },
+function isCommonDomain(domain: string): boolean {
+  const common = [
+    "gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "aol.com",
+    "icloud.com", "mail.com", "protonmail.com", "linkedin.com", "twitter.com",
+    "facebook.com", "github.com", "google.com", "microsoft.com", "apple.com",
+    "wikipedia.org", "medium.com", "substack.com"
   ];
-
-  // Filter by target departments if specified
-  let roles = defaultRoles;
-  if (targetDepartments && targetDepartments.length > 0) {
-    roles = defaultRoles.filter((r) =>
-      targetDepartments.some(
-        (d) => r.department.toLowerCase().includes(d.toLowerCase())
-      )
-    );
-  }
-
-  return JSON.stringify({
-    companyName,
-    industry: industry || "Technology",
-    recommendedRoles: roles,
-    searchSuggestions: roles.map((r) => `${companyName} ${r.title}`),
-  });
+  return common.includes(domain.toLowerCase());
 }
 
-function executeGenerateEmailPatterns(domain: string, personName: string): string {
-  const [firstName, ...lastNameParts] = personName.trim().split(" ");
-  const lastName = lastNameParts.join(" ");
+/**
+ * Extract people with roles from text
+ */
+function extractPeopleWithRoles(text: string): ExtractedPerson[] {
+  const people: ExtractedPerson[] = [];
+  const seenNames = new Set<string>();
 
-  if (!firstName || !lastName) {
-    return JSON.stringify({
-      patterns: [`${firstName.toLowerCase()}@${domain}`],
-      note: "Only first name available, limited patterns generated",
-    });
-  }
-
-  const f = firstName.toLowerCase();
-  const l = lastName.toLowerCase().replace(/\s+/g, "");
-  const fi = f[0];
-  const li = l[0];
-
+  // Pattern: "Name, Title" or "Name - Title" or "Title: Name"
   const patterns = [
-    `${f}.${l}@${domain}`,
-    `${f}${l}@${domain}`,
-    `${fi}${l}@${domain}`,
-    `${f}_${l}@${domain}`,
-    `${f}@${domain}`,
-    `${l}.${f}@${domain}`,
-    `${fi}.${l}@${domain}`,
+    // "John Smith, CEO" or "John Smith - CEO"
+    /([A-Z][a-z]+ [A-Z][a-z]+(?:\s[A-Z][a-z]+)?)[,\s-]+(?:the\s+)?(CEO|CTO|CFO|COO|CMO|CIO|CISO|CPO|CRO|VP|Vice President|Director|Head|Manager|President|Founder|Co-Founder|Partner|Chief\s+\w+\s+Officer)(?:\s+of\s+[\w\s]+)?/gi,
+    // "CEO John Smith" or "CEO: John Smith"
+    /(CEO|CTO|CFO|COO|CMO|CIO|CISO|CPO|CRO|VP|Vice President|Director|Head|Manager|President|Founder|Co-Founder|Partner|Chief\s+\w+\s+Officer)[:\s]+([A-Z][a-z]+ [A-Z][a-z]+(?:\s[A-Z][a-z]+)?)/gi,
+    // "led by John Smith"
+    /(?:led by|headed by|run by|founded by|started by)\s+([A-Z][a-z]+ [A-Z][a-z]+)/gi,
   ];
 
-  return JSON.stringify({
-    personName,
-    domain,
-    patterns,
-    mostLikely: patterns.slice(0, 3),
-  });
-}
+  for (const pattern of patterns) {
+    const matches = Array.from(text.matchAll(pattern));
+    for (const match of matches) {
+      let name: string;
+      let role: string;
 
-function executeSearchWeb(query: string): string {
-  // In a real implementation, this would call a search API
-  // For now, return simulated search guidance
-  return JSON.stringify({
-    query,
-    note: "Web search simulated - in production, integrate with search API",
-    suggestions: [
-      `Search LinkedIn for "${query}"`,
-      `Check company website's About/Team page`,
-      `Look for press releases mentioning key personnel`,
-    ],
-    simulatedFindings: [],
-  });
-}
+      if (match[1].match(/^[A-Z][a-z]/)) {
+        // Name is first
+        name = match[1].trim();
+        role = match[2]?.trim() || "Executive";
+      } else {
+        // Role is first
+        role = match[1].trim();
+        name = match[2]?.trim() || "";
+      }
 
-function executeTool(
-  toolName: string,
-  toolInput: Record<string, unknown>
-): string {
-  switch (toolName) {
-    case "analyze_company_research":
-      return executeAnalyzeCompanyResearch(toolInput.research_text as string);
-    case "identify_key_roles":
-      return executeIdentifyKeyRoles(
-        toolInput.company_name as string,
-        toolInput.industry as string | undefined,
-        toolInput.target_departments as string[] | undefined
-      );
-    case "generate_email_patterns":
-      return executeGenerateEmailPatterns(
-        toolInput.domain as string,
-        toolInput.person_name as string
-      );
-    case "search_web":
-      return executeSearchWeb(toolInput.query as string);
-    case "compile_contacts":
-      // This is the final tool - just return the input as-is
-      return JSON.stringify(toolInput);
-    default:
-      return JSON.stringify({ error: `Unknown tool: ${toolName}` });
+      if (name && !seenNames.has(name.toLowerCase())) {
+        seenNames.add(name.toLowerCase());
+        people.push({ name, role: normalizeRole(role) });
+      }
+    }
   }
+
+  return people;
+}
+
+function normalizeRole(role: string): string {
+  const roleMap: Record<string, string> = {
+    "ceo": "CEO",
+    "cto": "CTO",
+    "cfo": "CFO",
+    "coo": "COO",
+    "cmo": "CMO",
+    "cio": "CIO",
+    "ciso": "CISO",
+    "cpo": "CPO",
+    "cro": "CRO",
+    "vp": "VP",
+    "vice president": "VP",
+    "director": "Director",
+    "head": "Head",
+    "manager": "Manager",
+    "president": "President",
+    "founder": "Founder",
+    "co-founder": "Co-Founder",
+    "partner": "Partner",
+  };
+
+  const lower = role.toLowerCase();
+  for (const [key, value] of Object.entries(roleMap)) {
+    if (lower.includes(key)) {
+      return value;
+    }
+  }
+  return role;
+}
+
+/**
+ * Generate possible email patterns for a person
+ */
+function generateEmailPatterns(name: string, domain: string): string[] {
+  const parts = name.trim().split(/\s+/);
+  if (parts.length < 2) {
+    return [`${parts[0].toLowerCase()}@${domain}`];
+  }
+
+  const firstName = parts[0].toLowerCase();
+  const lastName = parts[parts.length - 1].toLowerCase();
+  const firstInitial = firstName[0];
+  const lastInitial = lastName[0];
+
+  return [
+    `${firstName}.${lastName}@${domain}`,
+    `${firstName}${lastName}@${domain}`,
+    `${firstInitial}${lastName}@${domain}`,
+    `${firstName}_${lastName}@${domain}`,
+    `${firstName}@${domain}`,
+    `${lastName}.${firstName}@${domain}`,
+    `${firstInitial}.${lastName}@${domain}`,
+  ];
+}
+
+// ============================================================================
+// STAGE 2: EMAIL VERIFICATION (DNS MX lookup - free & fast)
+// ============================================================================
+
+const mxCache = new Map<string, boolean>();
+
+/**
+ * Verify if a domain has valid MX records (can receive email)
+ */
+async function verifyEmailDomain(email: string): Promise<boolean> {
+  const domain = email.split("@")[1];
+  if (!domain) return false;
+
+  // Check cache
+  if (mxCache.has(domain)) {
+    return mxCache.get(domain)!;
+  }
+
+  try {
+    const records = await resolveMx(domain);
+    const hasValidMx = records && records.length > 0;
+    mxCache.set(domain, hasValidMx);
+    return hasValidMx;
+  } catch {
+    mxCache.set(domain, false);
+    return false;
+  }
+}
+
+/**
+ * Verify multiple emails in parallel with timeout
+ */
+async function verifyEmails(emails: string[], timeoutMs: number = 5000): Promise<Map<string, boolean>> {
+  const results = new Map<string, boolean>();
+
+  const verifyWithTimeout = async (email: string): Promise<[string, boolean]> => {
+    try {
+      const result = await Promise.race([
+        verifyEmailDomain(email),
+        new Promise<boolean>((_, reject) =>
+          setTimeout(() => reject(new Error("timeout")), timeoutMs)
+        ),
+      ]);
+      return [email, result];
+    } catch {
+      return [email, false];
+    }
+  };
+
+  const verifications = await Promise.all(emails.map(verifyWithTimeout));
+  for (const [email, verified] of verifications) {
+    results.set(email, verified);
+  }
+
+  return results;
+}
+
+// ============================================================================
+// STAGE 3: AI ANALYSIS (Only if needed - single focused call)
+// ============================================================================
+
+async function aiAnalyzeForContacts(
+  companyName: string,
+  research: string,
+  existingEmails: string[]
+): Promise<DiscoveredContact[]> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return [];
+  }
+
+  const anthropic = new Anthropic({ apiKey });
+
+  const prompt = `Analyze this company research and identify key contacts to reach out to.
+
+Company: ${companyName}
+
+Research Document:
+${research.substring(0, 4000)} ${research.length > 4000 ? "..." : ""}
+
+Already found emails: ${existingEmails.join(", ") || "None"}
+
+Based on this research, identify up to 5 key people who would be good contacts for B2B outreach. For each person, provide:
+1. Their full name (if mentioned)
+2. Their role/title
+3. Their likely email (generate based on company domain if not explicitly stated)
+
+Respond in this exact JSON format only, no other text:
+{
+  "contacts": [
+    {"name": "Full Name", "role": "Title", "email": "email@domain.com", "confidence": "high|medium|low"}
+  ],
+  "domain": "company.com"
+}`;
+
+  try {
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1024,
+      messages: [{ role: "user", content: prompt }],
+    });
+
+    const content = response.content[0];
+    if (content.type !== "text") {
+      return [];
+    }
+
+    // Extract JSON from response
+    const jsonMatch = content.text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      return [];
+    }
+
+    const parsed = JSON.parse(jsonMatch[0]);
+    return (parsed.contacts || []).map((c: { name: string; role: string; email: string; confidence?: string }) => ({
+      name: c.name,
+      email: c.email,
+      role: c.role,
+      confidence: (c.confidence as "high" | "medium" | "low") || "medium",
+      source: "AI Analysis",
+      verified: false,
+    }));
+  } catch (error) {
+    console.error("AI analysis error:", error);
+    return [];
+  }
+}
+
+// ============================================================================
+// MAIN RESEARCH FUNCTION
+// ============================================================================
+
+export interface ContactResearchParams {
+  companyName: string;
+  companyResearch: string;
+  companyDomain?: string;
 }
 
 export async function researchContacts(
   params: ContactResearchParams
 ): Promise<ResearchResult> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    throw new Error("ANTHROPIC_API_KEY environment variable is not set");
+  const startTime = Date.now();
+  const { companyName, companyResearch } = params;
+
+  const contacts: DiscoveredContact[] = [];
+  const stages: ResearchResult["stages"] = {
+    documentParsing: { found: 0, emails: [] },
+    verification: { verified: 0, failed: 0 },
+  };
+
+  // -------------------------------------------------------------------------
+  // STAGE 1: Document Parsing (fast, no API calls)
+  // -------------------------------------------------------------------------
+
+  // Extract emails directly from document
+  const documentEmails = extractEmails(companyResearch);
+  stages.documentParsing.emails = documentEmails;
+  stages.documentParsing.found = documentEmails.length;
+
+  // Extract domain
+  const domain = params.companyDomain || extractDomain(companyResearch, companyName);
+
+  // Extract people with roles
+  const people = extractPeopleWithRoles(companyResearch);
+
+  // For people without emails, generate possible patterns
+  const emailsToVerify = new Set(documentEmails);
+
+  if (domain) {
+    for (const person of people) {
+      // Check if we already have their email
+      const hasEmail = documentEmails.some(
+        (e) => e.toLowerCase().includes(person.name.split(" ")[0].toLowerCase())
+      );
+
+      if (!hasEmail) {
+        // Generate most likely email pattern (just first.last@domain)
+        const patterns = generateEmailPatterns(person.name, domain);
+        if (patterns.length > 0) {
+          emailsToVerify.add(patterns[0]); // Most common pattern
+          person.email = patterns[0];
+        }
+      } else {
+        // Find their existing email
+        person.email = documentEmails.find(
+          (e) => e.toLowerCase().includes(person.name.split(" ")[0].toLowerCase())
+        );
+      }
+    }
   }
 
-  const anthropic = new Anthropic({ apiKey });
+  // -------------------------------------------------------------------------
+  // STAGE 2: Email Verification (DNS MX lookup)
+  // -------------------------------------------------------------------------
 
-  const systemPrompt = `You are a B2B contact research specialist. Your job is to analyze company information and identify the best contacts to reach out to for business purposes.
+  const allEmails = Array.from(emailsToVerify);
+  const verificationResults = await verifyEmails(allEmails, 3000);
 
-Your task:
-1. First, analyze the company research document to understand the company
-2. Identify key roles that would be valuable to contact
-3. Generate likely email patterns for the company's domain
-4. Compile a final list of suggested contacts
+  for (const [email, verified] of Array.from(verificationResults.entries())) {
+    if (verified) {
+      stages.verification.verified++;
+    } else {
+      stages.verification.failed++;
+    }
+  }
 
-Be thorough but practical. Focus on finding 3-5 high-quality contacts rather than many low-quality ones.
+  // Add verified emails from document as contacts
+  for (const email of documentEmails) {
+    const verified = verificationResults.get(email) ?? false;
+    const matchingPerson = people.find(
+      (p) => p.email?.toLowerCase() === email.toLowerCase()
+    );
 
-When you have gathered enough information, use the compile_contacts tool to return your final results.`;
+    contacts.push({
+      name: matchingPerson?.name || extractNameFromEmail(email),
+      email,
+      role: matchingPerson?.role || "Contact",
+      confidence: verified ? "high" : "medium",
+      source: "Research Document",
+      verified,
+    });
+  }
 
-  const userPrompt = `Please research contacts for the following company:
+  // Add people with generated emails
+  for (const person of people) {
+    if (person.email && !documentEmails.includes(person.email.toLowerCase())) {
+      const verified = verificationResults.get(person.email) ?? false;
+      contacts.push({
+        name: person.name,
+        email: person.email,
+        role: person.role,
+        confidence: verified ? "medium" : "low",
+        source: "Generated Pattern",
+        verified,
+      });
+    }
+  }
 
-Company Name: ${params.companyName}
-${params.companyDomain ? `Company Domain: ${params.companyDomain}` : ""}
+  // -------------------------------------------------------------------------
+  // STAGE 3: AI Analysis (only if we found nothing)
+  // -------------------------------------------------------------------------
 
-Company Research Document:
-${params.companyResearch}
+  if (contacts.length === 0 && process.env.ANTHROPIC_API_KEY) {
+    stages.aiAnalysis = { used: true, reason: "No contacts found in document" };
 
-Find the best contacts to reach out to at this company. Start by analyzing the research document, then identify key roles, and finally compile a list of suggested contacts with likely email addresses.`;
+    const aiContacts = await aiAnalyzeForContacts(
+      companyName,
+      companyResearch,
+      documentEmails
+    );
 
-  const messages: Anthropic.MessageParam[] = [
-    { role: "user", content: userPrompt },
+    // Verify AI-suggested emails
+    const aiEmails = aiContacts.map((c) => c.email).filter(Boolean);
+    const aiVerification = await verifyEmails(aiEmails, 3000);
+
+    for (const contact of aiContacts) {
+      contact.verified = aiVerification.get(contact.email) ?? false;
+      if (contact.verified) {
+        contact.confidence = "medium";
+      }
+      contacts.push(contact);
+    }
+  } else {
+    stages.aiAnalysis = { used: false, reason: "Contacts found in document" };
+  }
+
+  // -------------------------------------------------------------------------
+  // Build summary
+  // -------------------------------------------------------------------------
+
+  const durationMs = Date.now() - startTime;
+  const verifiedCount = contacts.filter((c) => c.verified).length;
+
+  let summary = `Found ${contacts.length} contact(s) for ${companyName}. `;
+  summary += `${stages.documentParsing.found} email(s) extracted from document. `;
+  summary += `${verifiedCount} verified via MX lookup. `;
+  if (stages.aiAnalysis?.used) {
+    summary += `AI analysis was used to identify additional contacts.`;
+  }
+
+  return {
+    contacts: contacts.slice(0, 10), // Limit to 10 contacts
+    summary,
+    stages,
+    durationMs,
+  };
+}
+
+/**
+ * Try to extract a name from an email address
+ */
+function extractNameFromEmail(email: string): string {
+  const localPart = email.split("@")[0];
+
+  // Handle common patterns
+  const patterns = [
+    /^([a-z]+)\.([a-z]+)$/i,     // first.last
+    /^([a-z]+)_([a-z]+)$/i,      // first_last
+    /^([a-z])[a-z]*([a-z]+)$/i,  // flast or firstlast
   ];
 
-  const searchesPerformed: string[] = [];
-  let finalResult: ResearchResult | null = null;
-  let iterations = 0;
-  const maxIterations = 10;
-
-  // Agentic loop - keep processing until we get a final result or hit max iterations
-  while (!finalResult && iterations < maxIterations) {
-    iterations++;
-
-    const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 4096,
-      system: systemPrompt,
-      tools,
-      messages,
-    });
-
-    // Check if we're done
-    if (response.stop_reason === "end_turn") {
-      // Model finished without calling compile_contacts - extract any text response
-      const textContent = response.content.find((c) => c.type === "text");
-      finalResult = {
-        contacts: [],
-        summary: textContent
-          ? (textContent as Anthropic.TextBlock).text
-          : "Research completed but no contacts found",
-        searchesPerformed,
-      };
-      break;
-    }
-
-    // Process tool calls
-    if (response.stop_reason === "tool_use") {
-      const assistantMessage: Anthropic.MessageParam = {
-        role: "assistant",
-        content: response.content,
-      };
-      messages.push(assistantMessage);
-
-      const toolResults: Anthropic.ToolResultBlockParam[] = [];
-
-      for (const block of response.content) {
-        if (block.type === "tool_use") {
-          searchesPerformed.push(`${block.name}: ${JSON.stringify(block.input)}`);
-
-          const result = executeTool(
-            block.name,
-            block.input as Record<string, unknown>
-          );
-
-          // Check if this is the final compile_contacts call
-          if (block.name === "compile_contacts") {
-            const parsed = JSON.parse(result);
-            finalResult = {
-              contacts: parsed.contacts || [],
-              summary: parsed.summary || "Research completed",
-              searchesPerformed,
-            };
-          }
-
-          toolResults.push({
-            type: "tool_result",
-            tool_use_id: block.id,
-            content: result,
-          });
-        }
-      }
-
-      messages.push({ role: "user", content: toolResults });
+  for (const pattern of patterns) {
+    const match = localPart.match(pattern);
+    if (match) {
+      const firstName = match[1].charAt(0).toUpperCase() + match[1].slice(1);
+      const lastName = match[2].charAt(0).toUpperCase() + match[2].slice(1);
+      return `${firstName} ${lastName}`;
     }
   }
 
-  if (!finalResult) {
-    return {
-      contacts: [],
-      summary: "Research timed out after maximum iterations",
-      searchesPerformed,
-    };
-  }
-
-  return finalResult;
+  // Fallback: capitalize the local part
+  return localPart.charAt(0).toUpperCase() + localPart.slice(1);
 }
