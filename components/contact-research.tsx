@@ -235,7 +235,7 @@ export function ContactResearch({ companyId, companyName }: ContactResearchProps
               <div
                 className="h-full bg-blue-500 transition-all duration-1000 ease-out"
                 style={{
-                  width: `${Math.min((elapsedTime / 30) * 100, 95)}%`,
+                  width: `${Math.min((elapsedTime / 50) * 100, 95)}%`,
                 }}
               />
             </div>
@@ -243,12 +243,14 @@ export function ContactResearch({ companyId, companyName }: ContactResearchProps
             <div className="text-xs text-muted-foreground space-y-1">
               <p>
                 {elapsedTime < 5 && "Connecting to company website..."}
-                {elapsedTime >= 5 && elapsedTime < 15 && "Browsing pages for contacts..."}
-                {elapsedTime >= 15 && elapsedTime < 25 && "Extracting contact information..."}
-                {elapsedTime >= 25 && "Finalizing results..."}
+                {elapsedTime >= 5 && elapsedTime < 12 && "Browsing pages for contacts..."}
+                {elapsedTime >= 12 && elapsedTime < 20 && "Detecting email patterns..."}
+                {elapsedTime >= 20 && elapsedTime < 30 && "Applying patterns to executives..."}
+                {elapsedTime >= 30 && elapsedTime < 40 && "Verifying emails via OSINT..."}
+                {elapsedTime >= 40 && "Finalizing results..."}
               </p>
               <p className="text-muted-foreground/60">
-                This typically takes 10-30 seconds
+                This typically takes 20-45 seconds
               </p>
             </div>
           </div>
