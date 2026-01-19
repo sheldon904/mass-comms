@@ -122,3 +122,6 @@ npx prisma studio
 - **Resend Domain**: Verify a domain in Resend before sending production emails
 - **Rate Limits**: Resend has rate limits; for large volumes, implement queuing
 - **Security**: Never commit `.env` files; API keys should stay private
+
+---
+*Last updated: January 2026*
