@@ -2,7 +2,7 @@ import { notFound } from "next/navigation";
 import Link from "next/link";
 import { prisma } from "@/lib/db";
 import { marked } from "marked";
-import DOMPurify from "isomorphic-dompurify";
+import sanitizeHtml from "sanitize-html";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -51,7 +51,13 @@ export default async function CompanyDetailPage({
     { draft: 0, approved: 0, sent: 0 } as Record<string, number>
   );
 
-  const researchHtml = DOMPurify.sanitize(await marked(company.research));
+  const researchHtml = sanitizeHtml(await marked(company.research), {
+    allowedTags: sanitizeHtml.defaults.allowedTags.concat(['img']),
+    allowedAttributes: {
+      ...sanitizeHtml.defaults.allowedAttributes,
+      img: ['src', 'alt', 'title'],
+    },
+  });
 
   return (
     <div className="space-y-8">
