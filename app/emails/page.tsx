@@ -1,5 +1,7 @@
 import { prisma } from "@/lib/db";
 import { EmailPreview } from "@/components/email-preview";
+
+export const dynamic = "force-dynamic";
 import { BulkActions } from "@/components/bulk-actions";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 

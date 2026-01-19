@@ -1,5 +1,7 @@
 import { prisma } from "@/lib/db";
 import { FileUpload } from "@/components/file-upload";
+
+export const dynamic = "force-dynamic";
 import { CompanyCard } from "@/components/company-card";
 
 async function getCompanies() {
