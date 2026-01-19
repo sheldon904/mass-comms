@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ContactForm } from "@/components/contact-form";
+import { ContactResearch } from "@/components/contact-research";
 import { ArrowLeft, Mail, FileText } from "lucide-react";
 
 async function getCompany(id: string) {
@@ -120,6 +121,8 @@ export default async function CompanyDetailPage({
               <ContactForm companyId={company.id} contacts={company.contacts} />
             </CardContent>
           </Card>
+
+          <ContactResearch companyId={company.id} companyName={company.name} />
 
           <Card>
             <CardHeader>

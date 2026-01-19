@@ -3,7 +3,8 @@ import { prisma } from "@/lib/db";
 import { resend } from "@/lib/resend";
 
 const MAX_BATCH_SIZE = 100;
-const CUID_REGEX = /^c[a-z0-9]{24}$/;
+// CUIDs are typically 25-28 chars, alphanumeric starting with 'c'
+const CUID_REGEX = /^c[a-z0-9]{20,30}$/;
 
 export async function POST(request: NextRequest) {
   try {
