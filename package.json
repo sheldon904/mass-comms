@@ -1,0 +1,42 @@
+{
+  "name": "mass_comms",
+  "version": "1.0.0",
+  "description": "AI-powered mass email outreach system",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.71.2",
+    "@prisma/client": "^6.19.2",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@tailwindcss/typography": "^0.5.19",
+    "@types/node": "^25.0.9",
+    "@types/react": "^19.2.8",
+    "autoprefixer": "^10.4.23",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "gray-matter": "^4.0.3",
+    "lucide-react": "^0.562.0",
+    "marked": "^17.0.1",
+    "next": "^14.2.35",
+    "postcss": "^8.5.6",
+    "prisma": "^6.19.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "resend": "^6.8.0",
+    "tailwind-merge": "^3.4.0",
+    "tailwindcss": "^3.4.19",
+    "typescript": "^5.9.3"
+  },
+  "devDependencies": {
+    "@types/react-dom": "^19.2.3",
+    "eslint": "^9.39.2",
+    "eslint-config-next": "^16.1.3"
+  }
+}
