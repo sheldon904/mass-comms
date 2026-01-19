@@ -9,8 +9,9 @@ import {
   Sparkles,
   CheckCircle,
   AlertCircle,
-  Mail,
   Clock,
+  Brain,
+  Mail,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -32,9 +33,9 @@ interface DiscoveredContact {
 }
 
 interface ResearchStages {
-  documentParsing: { found: number; emails: string[] };
+  aiExtraction: { found: number; method: string };
   verification: { verified: number; failed: number };
-  aiAnalysis?: { used: boolean; reason: string };
+  emailGeneration?: { generated: number };
 }
 
 interface ContactResearchProps {
@@ -177,7 +178,7 @@ export function ContactResearch({ companyId, companyName }: ContactResearchProps
           {isResearching ? (
             <>
               <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              Analyzing document...
+              Analyzing with AI...
             </>
           ) : (
             <>
@@ -196,23 +197,29 @@ export function ContactResearch({ companyId, companyName }: ContactResearchProps
 
         {/* Research Stages Summary */}
         {stages && (
-          <div className="space-y-2 text-sm">
+          <div className="space-y-2 text-sm border rounded-lg p-3 bg-muted/50">
+            <div className="font-medium text-xs uppercase text-muted-foreground mb-2">
+              Research Summary
+            </div>
             <div className="flex items-center gap-2 text-muted-foreground">
-              <Mail className="h-4 w-4" />
+              <Brain className="h-4 w-4 text-purple-500" />
               <span>
-                {stages.documentParsing.found} email(s) found in document
+                AI extracted {stages.aiExtraction.found} people
+                <span className="text-xs ml-1">({stages.aiExtraction.method})</span>
               </span>
             </div>
             <div className="flex items-center gap-2 text-muted-foreground">
-              <CheckCircle className="h-4 w-4" />
+              <CheckCircle className="h-4 w-4 text-green-500" />
               <span>
                 {stages.verification.verified} verified, {stages.verification.failed} unverified
               </span>
             </div>
-            {stages.aiAnalysis?.used && (
+            {stages.emailGeneration && (
               <div className="flex items-center gap-2 text-muted-foreground">
-                <Sparkles className="h-4 w-4" />
-                <span>AI analysis used: {stages.aiAnalysis.reason}</span>
+                <Mail className="h-4 w-4 text-blue-500" />
+                <span>
+                  {stages.emailGeneration.generated} email(s) generated from verified domain
+                </span>
               </div>
             )}
             {timing && (
@@ -306,7 +313,7 @@ export function ContactResearch({ companyId, companyName }: ContactResearchProps
           <div className="text-sm text-muted-foreground text-center py-4 bg-muted rounded-md">
             <p>No contacts discovered in the research document.</p>
             <p className="text-xs mt-1">
-              Try adding email addresses directly to the research content.
+              The document may not contain identifiable people with names.
             </p>
           </div>
         )}

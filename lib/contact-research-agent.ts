@@ -21,185 +21,196 @@ export interface ResearchResult {
   contacts: DiscoveredContact[];
   summary: string;
   stages: {
-    documentParsing: { found: number; emails: string[] };
+    aiExtraction: { found: number; method: string };
     verification: { verified: number; failed: number };
-    aiAnalysis?: { used: boolean; reason: string };
+    emailGeneration?: { generated: number };
   };
   durationMs: number;
 }
 
-interface ExtractedPerson {
+interface ExtractedContact {
   name: string;
   role: string;
-  email?: string;
+  email: string | null;
+  confidence: "high" | "medium" | "low";
 }
 
 // ============================================================================
-// STAGE 1: DOCUMENT PARSING (No API calls - pure regex/parsing)
+// STAGE 1: AI-POWERED CONTACT EXTRACTION (Claude with tool_use)
 // ============================================================================
 
 /**
- * Extract all email addresses from text
+ * Use Claude with tool_use to intelligently extract contacts from document.
+ * This guarantees structured output and understands semantic context.
  */
-function extractEmails(text: string): string[] {
-  const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/gi;
-  const matches = text.match(emailRegex);
-  return matches ? Array.from(new Set(matches.map((e) => e.toLowerCase()))) : [];
-}
-
-/**
- * Extract company domain from text (URLs or email addresses)
- */
-function extractDomain(text: string, companyName: string): string | null {
-  // Try to find domain from URLs
-  const urlRegex = /(?:https?:\/\/)?(?:www\.)?([a-zA-Z0-9-]+\.[a-zA-Z]{2,})(?:\/|$)/gi;
-  const urlMatches = Array.from(text.matchAll(urlRegex));
-
-  // Try to find domain from email addresses
-  const emailRegex = /@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/gi;
-  const emailMatches = Array.from(text.matchAll(emailRegex));
-
-  const domains = new Set<string>();
-
-  for (const match of urlMatches) {
-    const domain = match[1].toLowerCase();
-    // Filter out common non-company domains
-    if (!isCommonDomain(domain)) {
-      domains.add(domain);
-    }
+async function extractContactsWithAI(
+  companyName: string,
+  research: string
+): Promise<{ contacts: ExtractedContact[]; domain: string | null }> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    console.log("No ANTHROPIC_API_KEY - returning empty contacts");
+    return { contacts: [], domain: null };
   }
 
-  for (const match of emailMatches) {
-    const domain = match[1].toLowerCase();
-    if (!isCommonDomain(domain)) {
-      domains.add(domain);
+  const anthropic = new Anthropic({ apiKey });
+
+  // Define the extraction tool with strict schema
+  const extractionTool: Anthropic.Tool = {
+    name: "extract_contacts",
+    description: `Extract real people and their contact information from a company research document.
+
+IMPORTANT RULES:
+1. Only extract REAL PEOPLE with actual names (First Last format)
+2. Do NOT extract job titles or descriptions as names (e.g., "Regional Vice President" is NOT a name)
+3. Names must be 2-3 words in typical human name format
+4. Only include emails that are EXPLICITLY written in the document
+5. If no email is found for a person, set email to null
+6. Confidence levels:
+   - "high": Person's name AND email explicitly in document
+   - "medium": Person's name in document but no email found
+   - "low": Person mentioned indirectly or title only
+
+EXAMPLES OF GOOD EXTRACTIONS:
+- "John Smith, CEO" → name: "John Smith", role: "CEO"
+- "led by Sarah Johnson" → name: "Sarah Johnson", role: "Executive"
+- "contact: mike@company.com" → include this email if Mike is mentioned
+
+EXAMPLES OF BAD EXTRACTIONS (DO NOT DO):
+- "Multiple Vice Presidents" → NOT a name, skip it
+- "Regional Director" → NOT a name, skip it
+- "CEO and team" → NOT a name, skip it
+- "Mace Hirt as" → Parsing error, should be "Mace Hirt"`,
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        contacts: {
+          type: "array",
+          description: "List of extracted contacts",
+          items: {
+            type: "object",
+            properties: {
+              name: {
+                type: "string",
+                description: "Full name of the person (First Last format, 2-3 words)"
+              },
+              role: {
+                type: "string",
+                description: "Job title or role (CEO, VP Sales, Director, etc.)"
+              },
+              email: {
+                type: ["string", "null"],
+                description: "Email address if explicitly found in document, otherwise null"
+              },
+              confidence: {
+                type: "string",
+                enum: ["high", "medium", "low"],
+                description: "Confidence level based on extraction rules"
+              }
+            },
+            required: ["name", "role", "email", "confidence"]
+          }
+        },
+        company_domain: {
+          type: ["string", "null"],
+          description: "Company's email domain if found (e.g., 'acme.com' from emails or website URLs)"
+        }
+      },
+      required: ["contacts", "company_domain"]
     }
-  }
-
-  // Try to match company name to domain
-  const normalizedCompany = companyName.toLowerCase().replace(/[^a-z0-9]/g, "");
-  const domainArray = Array.from(domains);
-  for (const domain of domainArray) {
-    if (domain.includes(normalizedCompany) || normalizedCompany.includes(domain.split(".")[0])) {
-      return domain;
-    }
-  }
-
-  // Return first non-common domain found
-  return domainArray.length > 0 ? domainArray[0] : null;
-}
-
-function isCommonDomain(domain: string): boolean {
-  const common = [
-    "gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "aol.com",
-    "icloud.com", "mail.com", "protonmail.com", "linkedin.com", "twitter.com",
-    "facebook.com", "github.com", "google.com", "microsoft.com", "apple.com",
-    "wikipedia.org", "medium.com", "substack.com"
-  ];
-  return common.includes(domain.toLowerCase());
-}
-
-/**
- * Extract people with roles from text
- */
-function extractPeopleWithRoles(text: string): ExtractedPerson[] {
-  const people: ExtractedPerson[] = [];
-  const seenNames = new Set<string>();
-
-  // Pattern: "Name, Title" or "Name - Title" or "Title: Name"
-  const patterns = [
-    // "John Smith, CEO" or "John Smith - CEO"
-    /([A-Z][a-z]+ [A-Z][a-z]+(?:\s[A-Z][a-z]+)?)[,\s-]+(?:the\s+)?(CEO|CTO|CFO|COO|CMO|CIO|CISO|CPO|CRO|VP|Vice President|Director|Head|Manager|President|Founder|Co-Founder|Partner|Chief\s+\w+\s+Officer)(?:\s+of\s+[\w\s]+)?/gi,
-    // "CEO John Smith" or "CEO: John Smith"
-    /(CEO|CTO|CFO|COO|CMO|CIO|CISO|CPO|CRO|VP|Vice President|Director|Head|Manager|President|Founder|Co-Founder|Partner|Chief\s+\w+\s+Officer)[:\s]+([A-Z][a-z]+ [A-Z][a-z]+(?:\s[A-Z][a-z]+)?)/gi,
-    // "led by John Smith"
-    /(?:led by|headed by|run by|founded by|started by)\s+([A-Z][a-z]+ [A-Z][a-z]+)/gi,
-  ];
-
-  for (const pattern of patterns) {
-    const matches = Array.from(text.matchAll(pattern));
-    for (const match of matches) {
-      let name: string;
-      let role: string;
-
-      if (match[1].match(/^[A-Z][a-z]/)) {
-        // Name is first
-        name = match[1].trim();
-        role = match[2]?.trim() || "Executive";
-      } else {
-        // Role is first
-        role = match[1].trim();
-        name = match[2]?.trim() || "";
-      }
-
-      if (name && !seenNames.has(name.toLowerCase())) {
-        seenNames.add(name.toLowerCase());
-        people.push({ name, role: normalizeRole(role) });
-      }
-    }
-  }
-
-  return people;
-}
-
-function normalizeRole(role: string): string {
-  const roleMap: Record<string, string> = {
-    "ceo": "CEO",
-    "cto": "CTO",
-    "cfo": "CFO",
-    "coo": "COO",
-    "cmo": "CMO",
-    "cio": "CIO",
-    "ciso": "CISO",
-    "cpo": "CPO",
-    "cro": "CRO",
-    "vp": "VP",
-    "vice president": "VP",
-    "director": "Director",
-    "head": "Head",
-    "manager": "Manager",
-    "president": "President",
-    "founder": "Founder",
-    "co-founder": "Co-Founder",
-    "partner": "Partner",
   };
 
-  const lower = role.toLowerCase();
-  for (const [key, value] of Object.entries(roleMap)) {
-    if (lower.includes(key)) {
-      return value;
+  // Truncate research to avoid token limits while keeping relevant content
+  const truncatedResearch = research.length > 6000
+    ? research.substring(0, 6000) + "\n...[truncated]"
+    : research;
+
+  const prompt = `Analyze this company research document and extract key contacts.
+
+Company: ${companyName}
+
+Research Document:
+---
+${truncatedResearch}
+---
+
+Extract all real people mentioned with their roles and any email addresses found.
+Remember: Only extract actual human names (First Last format), not job titles or descriptions.
+If you find emails in the document, include them. Otherwise set email to null.
+Also extract the company's email domain if visible from any emails or website URLs.`;
+
+  try {
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 1024,
+      tools: [extractionTool],
+      tool_choice: { type: "tool", name: "extract_contacts" },
+      messages: [{ role: "user", content: prompt }]
+    });
+
+    // Extract the tool use result
+    const toolUse = response.content.find(
+      (block): block is Anthropic.ToolUseBlock => block.type === "tool_use"
+    );
+
+    if (!toolUse || toolUse.name !== "extract_contacts") {
+      console.log("No tool use in response");
+      return { contacts: [], domain: null };
     }
+
+    const input = toolUse.input as {
+      contacts: ExtractedContact[];
+      company_domain: string | null;
+    };
+
+    // Validate and filter contacts
+    const validContacts = (input.contacts || []).filter(contact => {
+      // Must have a name with 2-3 words
+      const nameParts = contact.name.trim().split(/\s+/);
+      if (nameParts.length < 2 || nameParts.length > 4) {
+        console.log(`Filtered out invalid name: "${contact.name}" (wrong word count)`);
+        return false;
+      }
+
+      // Name parts should look like names (capitalized, reasonable length)
+      const looksLikeName = nameParts.every(part =>
+        part.length >= 2 &&
+        part.length <= 20 &&
+        /^[A-Z][a-z]+$/.test(part)
+      );
+
+      if (!looksLikeName) {
+        console.log(`Filtered out invalid name: "${contact.name}" (doesn't look like a name)`);
+        return false;
+      }
+
+      // Filter out obvious non-names
+      const nonNamePatterns = [
+        /^(multiple|several|various|regional|senior|junior|assistant)/i,
+        /\b(vice president|director|manager|team|group|department)\b$/i,
+        /\b(and|or|the|with)\b/i
+      ];
+
+      if (nonNamePatterns.some(pattern => pattern.test(contact.name))) {
+        console.log(`Filtered out non-name: "${contact.name}"`);
+        return false;
+      }
+
+      return true;
+    });
+
+    return {
+      contacts: validContacts,
+      domain: input.company_domain
+    };
+  } catch (error) {
+    console.error("AI extraction error:", error);
+    return { contacts: [], domain: null };
   }
-  return role;
-}
-
-/**
- * Generate possible email patterns for a person
- */
-function generateEmailPatterns(name: string, domain: string): string[] {
-  const parts = name.trim().split(/\s+/);
-  if (parts.length < 2) {
-    return [`${parts[0].toLowerCase()}@${domain}`];
-  }
-
-  const firstName = parts[0].toLowerCase();
-  const lastName = parts[parts.length - 1].toLowerCase();
-  const firstInitial = firstName[0];
-  const lastInitial = lastName[0];
-
-  return [
-    `${firstName}.${lastName}@${domain}`,
-    `${firstName}${lastName}@${domain}`,
-    `${firstInitial}${lastName}@${domain}`,
-    `${firstName}_${lastName}@${domain}`,
-    `${firstName}@${domain}`,
-    `${lastName}.${firstName}@${domain}`,
-    `${firstInitial}.${lastName}@${domain}`,
-  ];
 }
 
 // ============================================================================
-// STAGE 2: EMAIL VERIFICATION (DNS MX lookup - free & fast)
+// STAGE 2: EMAIL DOMAIN VERIFICATION (DNS MX lookup - free & fast)
 // ============================================================================
 
 const mxCache = new Map<string, boolean>();
@@ -228,18 +239,42 @@ async function verifyEmailDomain(email: string): Promise<boolean> {
 }
 
 /**
+ * Verify a domain has MX records
+ */
+async function verifyDomain(domain: string): Promise<boolean> {
+  if (mxCache.has(domain)) {
+    return mxCache.get(domain)!;
+  }
+
+  try {
+    const records = await resolveMx(domain);
+    const hasValidMx = records && records.length > 0;
+    mxCache.set(domain, hasValidMx);
+    return hasValidMx;
+  } catch {
+    mxCache.set(domain, false);
+    return false;
+  }
+}
+
+/**
  * Verify multiple emails in parallel with timeout
  */
-async function verifyEmails(emails: string[], timeoutMs: number = 5000): Promise<Map<string, boolean>> {
+async function verifyEmails(
+  emails: string[],
+  timeoutMs: number = 5000
+): Promise<Map<string, boolean>> {
   const results = new Map<string, boolean>();
 
-  const verifyWithTimeout = async (email: string): Promise<[string, boolean]> => {
+  const verifyWithTimeout = async (
+    email: string
+  ): Promise<[string, boolean]> => {
     try {
       const result = await Promise.race([
         verifyEmailDomain(email),
         new Promise<boolean>((_, reject) =>
           setTimeout(() => reject(new Error("timeout")), timeoutMs)
-        ),
+        )
       ]);
       return [email, result];
     } catch {
@@ -256,74 +291,23 @@ async function verifyEmails(emails: string[], timeoutMs: number = 5000): Promise
 }
 
 // ============================================================================
-// STAGE 3: AI ANALYSIS (Only if needed - single focused call)
+// STAGE 3: SMART EMAIL PATTERN GENERATION
 // ============================================================================
 
-async function aiAnalyzeForContacts(
-  companyName: string,
-  research: string,
-  existingEmails: string[]
-): Promise<DiscoveredContact[]> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    return [];
+/**
+ * Generate email address for a person using verified company domain
+ */
+function generateEmail(name: string, domain: string): string {
+  const parts = name.trim().split(/\s+/);
+  if (parts.length < 2) {
+    return `${parts[0].toLowerCase()}@${domain}`;
   }
 
-  const anthropic = new Anthropic({ apiKey });
+  const firstName = parts[0].toLowerCase();
+  const lastName = parts[parts.length - 1].toLowerCase();
 
-  const prompt = `Analyze this company research and identify key contacts to reach out to.
-
-Company: ${companyName}
-
-Research Document:
-${research.substring(0, 4000)} ${research.length > 4000 ? "..." : ""}
-
-Already found emails: ${existingEmails.join(", ") || "None"}
-
-Based on this research, identify up to 5 key people who would be good contacts for B2B outreach. For each person, provide:
-1. Their full name (if mentioned)
-2. Their role/title
-3. Their likely email (generate based on company domain if not explicitly stated)
-
-Respond in this exact JSON format only, no other text:
-{
-  "contacts": [
-    {"name": "Full Name", "role": "Title", "email": "email@domain.com", "confidence": "high|medium|low"}
-  ],
-  "domain": "company.com"
-}`;
-
-  try {
-    const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 1024,
-      messages: [{ role: "user", content: prompt }],
-    });
-
-    const content = response.content[0];
-    if (content.type !== "text") {
-      return [];
-    }
-
-    // Extract JSON from response
-    const jsonMatch = content.text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      return [];
-    }
-
-    const parsed = JSON.parse(jsonMatch[0]);
-    return (parsed.contacts || []).map((c: { name: string; role: string; email: string; confidence?: string }) => ({
-      name: c.name,
-      email: c.email,
-      role: c.role,
-      confidence: (c.confidence as "high" | "medium" | "low") || "medium",
-      source: "AI Analysis",
-      verified: false,
-    }));
-  } catch (error) {
-    console.error("AI analysis error:", error);
-    return [];
-  }
+  // Use most common pattern: first.last@domain
+  return `${firstName}.${lastName}@${domain}`;
 }
 
 // ============================================================================
@@ -344,124 +328,93 @@ export async function researchContacts(
 
   const contacts: DiscoveredContact[] = [];
   const stages: ResearchResult["stages"] = {
-    documentParsing: { found: 0, emails: [] },
-    verification: { verified: 0, failed: 0 },
+    aiExtraction: { found: 0, method: "Claude tool_use" },
+    verification: { verified: 0, failed: 0 }
   };
 
   // -------------------------------------------------------------------------
-  // STAGE 1: Document Parsing (fast, no API calls)
+  // STAGE 1: AI-Powered Contact Extraction
   // -------------------------------------------------------------------------
 
-  // Extract emails directly from document
-  const documentEmails = extractEmails(companyResearch);
-  stages.documentParsing.emails = documentEmails;
-  stages.documentParsing.found = documentEmails.length;
+  const { contacts: extractedContacts, domain: extractedDomain } =
+    await extractContactsWithAI(companyName, companyResearch);
 
-  // Extract domain
-  const domain = params.companyDomain || extractDomain(companyResearch, companyName);
+  stages.aiExtraction.found = extractedContacts.length;
 
-  // Extract people with roles
-  const people = extractPeopleWithRoles(companyResearch);
-
-  // For people without emails, generate possible patterns
-  const emailsToVerify = new Set(documentEmails);
-
-  if (domain) {
-    for (const person of people) {
-      // Check if we already have their email
-      const hasEmail = documentEmails.some(
-        (e) => e.toLowerCase().includes(person.name.split(" ")[0].toLowerCase())
-      );
-
-      if (!hasEmail) {
-        // Generate most likely email pattern (just first.last@domain)
-        const patterns = generateEmailPatterns(person.name, domain);
-        if (patterns.length > 0) {
-          emailsToVerify.add(patterns[0]); // Most common pattern
-          person.email = patterns[0];
-        }
-      } else {
-        // Find their existing email
-        person.email = documentEmails.find(
-          (e) => e.toLowerCase().includes(person.name.split(" ")[0].toLowerCase())
-        );
-      }
-    }
-  }
+  // Use provided domain or extracted domain
+  const companyDomain = params.companyDomain || extractedDomain;
 
   // -------------------------------------------------------------------------
-  // STAGE 2: Email Verification (DNS MX lookup)
+  // STAGE 2: Verify domain if we have one
   // -------------------------------------------------------------------------
 
-  const allEmails = Array.from(emailsToVerify);
-  const verificationResults = await verifyEmails(allEmails, 3000);
-
-  for (const [email, verified] of Array.from(verificationResults.entries())) {
-    if (verified) {
-      stages.verification.verified++;
+  let domainVerified = false;
+  if (companyDomain) {
+    domainVerified = await verifyDomain(companyDomain);
+    if (domainVerified) {
+      console.log(`Domain verified: ${companyDomain}`);
     } else {
-      stages.verification.failed++;
+      console.log(`Domain verification failed: ${companyDomain}`);
     }
   }
 
-  // Add verified emails from document as contacts
-  for (const email of documentEmails) {
-    const verified = verificationResults.get(email) ?? false;
-    const matchingPerson = people.find(
-      (p) => p.email?.toLowerCase() === email.toLowerCase()
-    );
+  // -------------------------------------------------------------------------
+  // STAGE 3: Process contacts - verify existing emails, generate for others
+  // -------------------------------------------------------------------------
 
-    contacts.push({
-      name: matchingPerson?.name || extractNameFromEmail(email),
-      email,
-      role: matchingPerson?.role || "Contact",
-      confidence: verified ? "high" : "medium",
-      source: "Research Document",
-      verified,
-    });
+  const emailsToVerify: string[] = [];
+
+  // Collect emails that need verification
+  for (const contact of extractedContacts) {
+    if (contact.email) {
+      emailsToVerify.push(contact.email);
+    }
   }
 
-  // Add people with generated emails
-  for (const person of people) {
-    if (person.email && !documentEmails.includes(person.email.toLowerCase())) {
-      const verified = verificationResults.get(person.email) ?? false;
+  // Verify all emails in parallel
+  const verificationResults = await verifyEmails(emailsToVerify, 3000);
+
+  // Process each contact
+  let generatedCount = 0;
+  for (const extracted of extractedContacts) {
+    let email = extracted.email;
+    let verified = false;
+    let source = "AI Extraction";
+    let confidence = extracted.confidence;
+
+    if (email) {
+      // Verify the email from document
+      verified = verificationResults.get(email) ?? false;
+      if (verified) {
+        stages.verification.verified++;
+        confidence = "high";
+      } else {
+        stages.verification.failed++;
+      }
+    } else if (companyDomain && domainVerified) {
+      // Generate email for contacts without one
+      email = generateEmail(extracted.name, companyDomain);
+      verified = true; // Domain is already verified
+      source = "Generated (verified domain)";
+      confidence = "medium";
+      generatedCount++;
+    }
+
+    // Only add contacts that have an email
+    if (email) {
       contacts.push({
-        name: person.name,
-        email: person.email,
-        role: person.role,
-        confidence: verified ? "medium" : "low",
-        source: "Generated Pattern",
-        verified,
+        name: extracted.name,
+        email,
+        role: extracted.role,
+        confidence,
+        source,
+        verified
       });
     }
   }
 
-  // -------------------------------------------------------------------------
-  // STAGE 3: AI Analysis (only if we found nothing)
-  // -------------------------------------------------------------------------
-
-  if (contacts.length === 0 && process.env.ANTHROPIC_API_KEY) {
-    stages.aiAnalysis = { used: true, reason: "No contacts found in document" };
-
-    const aiContacts = await aiAnalyzeForContacts(
-      companyName,
-      companyResearch,
-      documentEmails
-    );
-
-    // Verify AI-suggested emails
-    const aiEmails = aiContacts.map((c) => c.email).filter(Boolean);
-    const aiVerification = await verifyEmails(aiEmails, 3000);
-
-    for (const contact of aiContacts) {
-      contact.verified = aiVerification.get(contact.email) ?? false;
-      if (contact.verified) {
-        contact.confidence = "medium";
-      }
-      contacts.push(contact);
-    }
-  } else {
-    stages.aiAnalysis = { used: false, reason: "Contacts found in document" };
+  if (generatedCount > 0) {
+    stages.emailGeneration = { generated: generatedCount };
   }
 
   // -------------------------------------------------------------------------
@@ -472,42 +425,16 @@ export async function researchContacts(
   const verifiedCount = contacts.filter((c) => c.verified).length;
 
   let summary = `Found ${contacts.length} contact(s) for ${companyName}. `;
-  summary += `${stages.documentParsing.found} email(s) extracted from document. `;
-  summary += `${verifiedCount} verified via MX lookup. `;
-  if (stages.aiAnalysis?.used) {
-    summary += `AI analysis was used to identify additional contacts.`;
+  summary += `AI extracted ${stages.aiExtraction.found} people from document. `;
+  if (stages.emailGeneration) {
+    summary += `Generated ${stages.emailGeneration.generated} email(s). `;
   }
+  summary += `${verifiedCount} verified via MX lookup.`;
 
   return {
     contacts: contacts.slice(0, 10), // Limit to 10 contacts
     summary,
     stages,
-    durationMs,
+    durationMs
   };
-}
-
-/**
- * Try to extract a name from an email address
- */
-function extractNameFromEmail(email: string): string {
-  const localPart = email.split("@")[0];
-
-  // Handle common patterns
-  const patterns = [
-    /^([a-z]+)\.([a-z]+)$/i,     // first.last
-    /^([a-z]+)_([a-z]+)$/i,      // first_last
-    /^([a-z])[a-z]*([a-z]+)$/i,  // flast or firstlast
-  ];
-
-  for (const pattern of patterns) {
-    const match = localPart.match(pattern);
-    if (match) {
-      const firstName = match[1].charAt(0).toUpperCase() + match[1].slice(1);
-      const lastName = match[2].charAt(0).toUpperCase() + match[2].slice(1);
-      return `${firstName} ${lastName}`;
-    }
-  }
-
-  // Fallback: capitalize the local part
-  return localPart.charAt(0).toUpperCase() + localPart.slice(1);
 }
