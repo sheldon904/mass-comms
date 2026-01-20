@@ -36,6 +36,17 @@ export interface ContactResearchParams {
   companyDomain?: string;
 }
 
+// Progress event types for SSE streaming
+export type ProgressEvent =
+  | { type: "started"; companyName: string; domain: string }
+  | { type: "phase"; phase: "extracting" | "browsing" | "searching" | "complete"; message: string }
+  | { type: "iteration"; iteration: number; maxIterations: number; action: string }
+  | { type: "contact"; contact: DiscoveredContact }
+  | { type: "complete"; result: ResearchResult }
+  | { type: "error"; message: string };
+
+export type ProgressCallback = (event: ProgressEvent) => void;
+
 interface KeyPerson {
   name: string;
   role: string;
@@ -51,12 +62,13 @@ interface ResearchPlan {
 // CONFIGURATION
 // ============================================================================
 
-// Vercel has 55s max - we use generous internal timeout
+// Vercel has 55s max - we use 50s internal to leave buffer
 const INTERNAL_TIMEOUT_MS = 50000;
+const MAX_ITERATIONS = 10;
 
 // Rate limit handling
-const MAX_RETRIES = 3;
-const BASE_RETRY_DELAY_MS = 2000;
+const MAX_RETRIES = 2;
+const BASE_RETRY_DELAY_MS = 1500;
 
 // ============================================================================
 // DOMAIN EXTRACTION
@@ -82,7 +94,6 @@ function extractCompanyDomain(research: string, companyName: string): string | n
 
   const domainMatches: { domain: string; score: number }[] = [];
 
-  // Pattern 1: Explicit website mentions
   const websitePatterns = [
     /(?:website|web site|homepage|visit us at|learn more at|visit)[:\s]+(?:https?:\/\/)?(?:www\.)?([a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?)/gi,
     /(?:www\.)([a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?)/gi,
@@ -99,7 +110,6 @@ function extractCompanyDomain(research: string, companyName: string): string | n
     }
   }
 
-  // Pattern 2: Email domains
   const emailPattern = /@([a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/gi;
   let emailMatch;
   while ((emailMatch = emailPattern.exec(research)) !== null) {
@@ -110,7 +120,6 @@ function extractCompanyDomain(research: string, companyName: string): string | n
     }
   }
 
-  // Pattern 3: URLs in text
   const urlPattern = /https?:\/\/(?:www\.)?([a-zA-Z0-9-]+\.[a-zA-Z]{2,}(?:\.[a-zA-Z]{2,})?)/gi;
   let urlMatch;
   while ((urlMatch = urlPattern.exec(research)) !== null) {
@@ -124,13 +133,10 @@ function extractCompanyDomain(research: string, companyName: string): string | n
   domainMatches.sort((a, b) => b.score - a.score);
 
   if (domainMatches.length > 0) {
-    console.log(`Domain candidates: ${JSON.stringify(domainMatches.slice(0, 5))}`);
     return domainMatches[0].domain;
   }
 
-  const simpleDomain = cleanCompanyName + ".com";
-  console.log(`No domain found, trying fallback: ${simpleDomain}`);
-  return simpleDomain;
+  return cleanCompanyName + ".com";
 }
 
 // ============================================================================
@@ -144,7 +150,7 @@ async function fetchWebpage(url: string): Promise<{ success: boolean; content: s
     }
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 12000);
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
 
     const response = await fetch(url, {
       signal: controller.signal,
@@ -162,8 +168,8 @@ async function fetchWebpage(url: string): Promise<{ success: boolean; content: s
 
     const html = await response.text();
     const content = extractTextFromHtml(html);
-    const truncated = content.length > 15000
-      ? content.substring(0, 15000) + "\n...[truncated]"
+    const truncated = content.length > 12000
+      ? content.substring(0, 12000) + "\n...[truncated]"
       : content;
 
     return { success: true, content: truncated };
@@ -211,7 +217,7 @@ function extractTextFromHtml(html: string): string {
   text = text.replace(/\n\s+/g, "\n");
   text = text.trim();
 
-  let result = "=== PAGE CONTENT ===\n" + text.substring(0, 10000);
+  let result = "=== PAGE CONTENT ===\n" + text.substring(0, 8000);
 
   if (emails.length > 0) {
     result += "\n\n=== EMAILS FOUND ===\n" + Array.from(new Set(emails)).join("\n");
@@ -231,7 +237,7 @@ function extractTextFromHtml(html: string): string {
   });
 
   if (relevantLinks.length > 0) {
-    result += "\n\n=== RELEVANT LINKS ===\n" + relevantLinks.slice(0, 10).join("\n");
+    result += "\n\n=== RELEVANT LINKS ===\n" + relevantLinks.slice(0, 8).join("\n");
   }
 
   return result;
@@ -246,7 +252,7 @@ async function webSearch(query: string): Promise<{ success: boolean; results: st
     const searchUrl = `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000);
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
 
     const response = await fetch(searchUrl, {
       signal: controller.signal,
@@ -272,7 +278,7 @@ async function webSearch(query: string): Promise<{ success: boolean; results: st
     const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
     const emails = text.match(emailRegex) || [];
 
-    let result = text.length > 4000 ? text.substring(0, 4000) : text;
+    let result = text.length > 3000 ? text.substring(0, 3000) : text;
 
     if (emails.length > 0) {
       result += "\n\n=== EMAILS IN RESULTS ===\n" + Array.from(new Set(emails)).join("\n");
@@ -320,10 +326,8 @@ async function callAnthropicWithRetry(
   startTime: number
 ): Promise<Anthropic.Message | null> {
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    // Check if we have time for a retry
     const elapsed = Date.now() - startTime;
-    if (elapsed > INTERNAL_TIMEOUT_MS - 5000) {
-      console.log("[API] Not enough time for retry");
+    if (elapsed > INTERNAL_TIMEOUT_MS - 8000) {
       return null;
     }
 
@@ -335,9 +339,7 @@ async function callAnthropicWithRetry(
         (error.message.includes("429") || error.message.includes("rate_limit"));
 
       if (isRateLimit && attempt < MAX_RETRIES - 1) {
-        // Exponential backoff with jitter
-        const delay = BASE_RETRY_DELAY_MS * Math.pow(2, attempt) + Math.random() * 1000;
-        console.log(`[API] Rate limited, waiting ${Math.round(delay)}ms before retry ${attempt + 1}...`);
+        const delay = BASE_RETRY_DELAY_MS * Math.pow(2, attempt) + Math.random() * 500;
         await new Promise(resolve => setTimeout(resolve, delay));
         continue;
       }
@@ -351,73 +353,61 @@ async function callAnthropicWithRetry(
 }
 
 // ============================================================================
-// PHASE 1: EXTRACT KEY INFO FROM RESEARCH (Single API call)
+// PHASE 1: EXTRACT KEY INFO FROM RESEARCH
 // ============================================================================
 
 async function extractKeyInfo(
   anthropic: Anthropic,
   companyName: string,
   companyResearch: string,
-  startTime: number
+  startTime: number,
+  onProgress?: ProgressCallback
 ): Promise<ResearchPlan | null> {
-  console.log("[Phase 1] Extracting key info from research doc...");
+  onProgress?.({ type: "phase", phase: "extracting", message: "Analyzing research document..." });
 
-  // Truncate research doc to prevent rate limit issues (max ~8000 chars)
-  const truncatedResearch = companyResearch.length > 8000
-    ? companyResearch.substring(0, 8000) + "\n...[truncated]"
+  const truncatedResearch = companyResearch.length > 6000
+    ? companyResearch.substring(0, 6000) + "\n...[truncated]"
     : companyResearch;
 
   const response = await callAnthropicWithRetry(anthropic, {
     model: "claude-sonnet-4-20250514",
-    max_tokens: 1000,
-    system: "You extract key information from company research documents. Be concise. Return valid JSON only.",
+    max_tokens: 800,
+    system: "Extract key people from company research. Return ONLY valid JSON.",
     messages: [{
       role: "user",
-      content: `Extract key people and info from this research about ${companyName}:
+      content: `Extract key people from this research about ${companyName}:
 
 ${truncatedResearch}
 
 Return JSON:
-{
-  "keyPeople": [{"name": "Full Name", "role": "CEO/President/etc"}],
-  "companyDescription": "One sentence description",
-  "suggestedPages": ["about", "team", "contact"]
-}
+{"keyPeople": [{"name": "Full Name", "role": "Title"}], "companyDescription": "Brief description", "suggestedPages": ["about", "team", "contact"]}
 
 Rules:
-- Only include REAL people with specific names (not generic titles)
-- Maximum 6 key people (prioritize executives: CEO, President, Owner, Founder)
-- Keep descriptions short
-- Return ONLY valid JSON, no markdown`
+- Only real people with specific names (max 5)
+- Prioritize: CEO, President, Owner, Founder
+- JSON only, no markdown`
     }]
   }, startTime);
 
-  if (!response) {
-    console.log("[Phase 1] Failed to get response");
-    return null;
-  }
+  if (!response) return null;
 
   try {
     const textBlock = response.content.find(b => b.type === "text");
     if (!textBlock || textBlock.type !== "text") return null;
 
-    // Clean the response - remove markdown code blocks if present
     let jsonText = textBlock.text.trim();
     if (jsonText.startsWith("```")) {
       jsonText = jsonText.replace(/^```json?\n?/, "").replace(/\n?```$/, "");
     }
 
-    const plan = JSON.parse(jsonText) as ResearchPlan;
-    console.log(`[Phase 1] Found ${plan.keyPeople.length} key people:`, plan.keyPeople.map(p => p.name));
-    return plan;
-  } catch (e) {
-    console.error("[Phase 1] Failed to parse response:", e);
+    return JSON.parse(jsonText) as ResearchPlan;
+  } catch {
     return null;
   }
 }
 
 // ============================================================================
-// PHASE 2: AGENTIC BROWSING (Lightweight prompts)
+// AGENT TOOLS
 // ============================================================================
 
 const agentTools: Anthropic.Tool[] = [
@@ -445,7 +435,7 @@ const agentTools: Anthropic.Tool[] = [
   },
   {
     name: "submit_contacts",
-    description: "Submit discovered contacts with their source.",
+    description: "Submit discovered contacts.",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -471,10 +461,13 @@ const agentTools: Anthropic.Tool[] = [
 ];
 
 // ============================================================================
-// MAIN RESEARCH FUNCTION
+// MAIN RESEARCH FUNCTION WITH STREAMING SUPPORT
 // ============================================================================
 
-export async function researchContacts(params: ContactResearchParams): Promise<ResearchResult> {
+export async function researchContacts(
+  params: ContactResearchParams,
+  onProgress?: ProgressCallback
+): Promise<ResearchResult> {
   const startTime = Date.now();
   const { companyName, companyResearch } = params;
   const pagesVisited: string[] = [];
@@ -483,6 +476,7 @@ export async function researchContacts(params: ContactResearchParams): Promise<R
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
+    onProgress?.({ type: "error", message: "No API key configured" });
     return {
       contacts: [],
       summary: "No API key configured",
@@ -492,9 +486,9 @@ export async function researchContacts(params: ContactResearchParams): Promise<R
   }
 
   const domain = params.companyDomain || extractCompanyDomain(companyResearch, companyName);
-  console.log(`[Research] Company: ${companyName}, Domain: ${domain}`);
 
   if (!domain) {
+    onProgress?.({ type: "error", message: "Could not determine website" });
     return {
       contacts: [],
       summary: `Could not determine website for ${companyName}`,
@@ -503,22 +497,20 @@ export async function researchContacts(params: ContactResearchParams): Promise<R
     };
   }
 
+  onProgress?.({ type: "started", companyName, domain });
+
   const anthropic = new Anthropic({ apiKey });
 
-  // =========================================================================
-  // PHASE 1: Extract key info (single API call with truncated doc)
-  // =========================================================================
-  const plan = await extractKeyInfo(anthropic, companyName, companyResearch, startTime);
+  // Phase 1: Extract key info
+  const plan = await extractKeyInfo(anthropic, companyName, companyResearch, startTime, onProgress);
 
   const keyPeopleList = plan?.keyPeople && plan.keyPeople.length > 0
     ? plan.keyPeople.map(p => `${p.name} (${p.role})`).join(", ")
     : "executives and key staff";
 
-  // =========================================================================
-  // PHASE 2: Agentic browsing with LIGHTWEIGHT prompts
-  // =========================================================================
+  onProgress?.({ type: "phase", phase: "browsing", message: `Found key people: ${keyPeopleList}` });
 
-  // Compact system prompt - no research doc, just key info
+  // Phase 2: Agentic browsing
   const systemPrompt = `You find contacts for ${companyName} (${domain}).
 
 KEY PEOPLE TO FIND: ${keyPeopleList}
@@ -527,16 +519,13 @@ TOOLS: browse_webpage, web_search, submit_contacts
 
 STRATEGY:
 1. Browse https://${domain} and team/about/contact pages
-2. Submit contacts AS YOU FIND THEM (don't wait)
-3. For key people without emails, use web_search to find them
-4. Departmental emails (info@, hr@) are valuable too
+2. Submit contacts AS YOU FIND THEM
+3. For key people without emails, use web_search
+4. Departmental emails (info@, hr@) are valuable
 
-CONFIDENCE:
-- direct_website = HIGH (found on company site)
-- osint_search = MEDIUM (found via search)
-- pattern_match = LOW (guessed)
+CONFIDENCE: direct_website=HIGH, osint_search=MEDIUM, pattern_match=LOW
 
-NEVER invent emails. Only submit real ones you find.`;
+NEVER invent emails. Only submit real ones.`;
 
   const messages: Anthropic.MessageParam[] = [{
     role: "user",
@@ -552,30 +541,34 @@ NEVER invent emails. Only submit real ones you find.`;
     const elapsed = Date.now() - startTime;
     const remaining = INTERNAL_TIMEOUT_MS - elapsed;
 
-    console.log(`[Agent] Iteration ${iteration}, elapsed: ${Math.round(elapsed/1000)}s, remaining: ${Math.round(remaining/1000)}s`);
-
-    // Time check - need at least 8s for an iteration
-    if (remaining < 8000) {
-      console.log("[Agent] Time limit - stopping");
+    // Time check - need at least 10s for an iteration
+    if (remaining < 10000) {
+      onProgress?.({ type: "phase", phase: "complete", message: "Time limit reached, returning results" });
       break;
     }
 
-    // Safety limit
-    if (iteration > 12) {
-      console.log("[Agent] Max iterations reached");
+    if (iteration > MAX_ITERATIONS) {
+      onProgress?.({ type: "phase", phase: "complete", message: "Max iterations reached" });
       break;
     }
+
+    onProgress?.({
+      type: "iteration",
+      iteration,
+      maxIterations: MAX_ITERATIONS,
+      action: "Thinking..."
+    });
 
     const response = await callAnthropicWithRetry(anthropic, {
       model: "claude-sonnet-4-20250514",
-      max_tokens: 2000,
+      max_tokens: 1500,
       system: systemPrompt,
       tools: agentTools,
       messages
     }, startTime);
 
     if (!response) {
-      console.log("[Agent] No response - stopping");
+      onProgress?.({ type: "phase", phase: "complete", message: "API timeout, returning results" });
       break;
     }
 
@@ -586,11 +579,11 @@ NEVER invent emails. Only submit real ones you find.`;
     if (toolUseBlocks.length === 0) {
       noToolCallCount++;
       if (noToolCallCount >= 2) {
-        console.log("[Agent] Agent finished");
+        onProgress?.({ type: "phase", phase: "complete", message: "Research complete" });
         break;
       }
       messages.push({ role: "assistant", content: response.content });
-      messages.push({ role: "user", content: "Continue searching. Use browse_webpage or web_search to find more contacts." });
+      messages.push({ role: "user", content: "Continue searching for more contacts." });
       continue;
     }
 
@@ -598,7 +591,6 @@ NEVER invent emails. Only submit real ones you find.`;
     const toolResults: Anthropic.ToolResultBlockParam[] = [];
 
     for (const toolUse of toolUseBlocks) {
-      // Time check before each tool
       if (Date.now() - startTime > INTERNAL_TIMEOUT_MS - 5000) {
         toolResults.push({
           type: "tool_result",
@@ -612,14 +604,12 @@ NEVER invent emails. Only submit real ones you find.`;
         const input = toolUse.input as { url: string };
         let url = input.url;
 
-        // Validate domain
         try {
           const urlObj = new URL(url.startsWith("http") ? url : `https://${url}`);
           const urlDomain = urlObj.hostname.replace("www.", "");
           const targetDomain = domain.replace("www.", "");
 
           if (!urlDomain.includes(targetDomain) && !targetDomain.includes(urlDomain)) {
-            console.log(`[Agent] Blocked: ${url}`);
             toolResults.push({
               type: "tool_result",
               tool_use_id: toolUse.id,
@@ -637,7 +627,13 @@ NEVER invent emails. Only submit real ones you find.`;
         }
 
         pagesVisited.push(url);
-        console.log(`[Agent] Browse: ${url}`);
+        onProgress?.({
+          type: "iteration",
+          iteration,
+          maxIterations: MAX_ITERATIONS,
+          action: `Browsing ${new URL(url.startsWith("http") ? url : `https://${url}`).pathname || "/"}`
+        });
+
         const result = await fetchWebpage(url);
 
         toolResults.push({
@@ -649,7 +645,13 @@ NEVER invent emails. Only submit real ones you find.`;
       } else if (toolUse.name === "web_search") {
         const input = toolUse.input as { query: string };
         searchesPerformed.push(input.query);
-        console.log(`[Agent] Search: ${input.query}`);
+
+        onProgress?.({
+          type: "iteration",
+          iteration,
+          maxIterations: MAX_ITERATIONS,
+          action: `Searching: ${input.query.substring(0, 40)}...`
+        });
 
         const result = await webSearch(input.query);
 
@@ -671,7 +673,6 @@ NEVER invent emails. Only submit real ones you find.`;
           }>
         };
 
-        let addedCount = 0;
         const seenEmails = new Set(finalContacts.map(c => c.email.toLowerCase()));
 
         for (const contact of input.contacts || []) {
@@ -689,7 +690,7 @@ NEVER invent emails. Only submit real ones you find.`;
             confidence = "low";
           }
 
-          finalContacts.push({
+          const newContact: DiscoveredContact = {
             name: contact.name,
             email: contact.email,
             phone: contact.phone || null,
@@ -697,16 +698,16 @@ NEVER invent emails. Only submit real ones you find.`;
             confidence,
             source: contact.source,
             verified: mxVerified
-          });
-          addedCount++;
+          };
 
-          console.log(`[Agent] Added: ${contact.name} <${contact.email}> (${confidence})`);
+          finalContacts.push(newContact);
+          onProgress?.({ type: "contact", contact: newContact });
         }
 
         toolResults.push({
           type: "tool_result",
           tool_use_id: toolUse.id,
-          content: `Added ${addedCount} contact(s). Total: ${finalContacts.length}. Continue searching if time permits.`
+          content: `Submitted. Total: ${finalContacts.length}. Continue searching.`
         });
       }
     }
@@ -715,9 +716,7 @@ NEVER invent emails. Only submit real ones you find.`;
     messages.push({ role: "user", content: toolResults });
   }
 
-  // =========================================================================
-  // RESULTS
-  // =========================================================================
+  // Build final result
   const durationMs = Date.now() - startTime;
   const phonesFound = finalContacts.filter(c => c.phone).length;
   const emailsVerified = finalContacts.filter(c => c.verified).length;
@@ -730,9 +729,7 @@ NEVER invent emails. Only submit real ones you find.`;
   summary += `Confidence: ${highConfidence} high, ${mediumConfidence} medium, ${lowConfidence} low.`;
   if (phonesFound > 0) summary += ` ${phonesFound} phone(s).`;
 
-  console.log(`[Research] Complete in ${Math.round(durationMs/1000)}s - ${finalContacts.length} contacts`);
-
-  return {
+  const result: ResearchResult = {
     contacts: finalContacts.slice(0, 20),
     summary,
     stages: {
@@ -743,4 +740,8 @@ NEVER invent emails. Only submit real ones you find.`;
     },
     durationMs
   };
+
+  onProgress?.({ type: "complete", result });
+
+  return result;
 }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import {
   Loader2,
@@ -14,6 +14,7 @@ import {
   Phone,
   Mail,
   Timer,
+  Zap,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -47,16 +48,36 @@ interface ContactResearchProps {
   companyName: string;
 }
 
+// Progress state for streaming updates
+interface ProgressState {
+  phase: "extracting" | "browsing" | "searching" | "complete" | null;
+  phaseMessage: string;
+  iteration: number;
+  maxIterations: number;
+  action: string;
+  contactsFoundSoFar: number;
+}
+
 export function ContactResearch({ companyId, companyName }: ContactResearchProps) {
   const [isResearching, setIsResearching] = useState(false);
   const [results, setResults] = useState<DiscoveredContact[] | null>(null);
+  const [liveContacts, setLiveContacts] = useState<DiscoveredContact[]>([]);
   const [summary, setSummary] = useState<string | null>(null);
   const [stages, setStages] = useState<ResearchStages | null>(null);
   const [timing, setTiming] = useState<{ researchMs: number; totalMs: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [addingContact, setAddingContact] = useState<string | null>(null);
   const [elapsedTime, setElapsedTime] = useState(0);
+  const [progress, setProgress] = useState<ProgressState>({
+    phase: null,
+    phaseMessage: "",
+    iteration: 0,
+    maxIterations: 10,
+    action: "",
+    contactsFoundSoFar: 0,
+  });
   const timerRef = useRef<NodeJS.Timeout | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
   const router = useRouter();
 
   // Timer effect for progress indicator
@@ -80,37 +101,151 @@ export function ContactResearch({ companyId, companyName }: ContactResearchProps
     };
   }, [isResearching]);
 
-  const handleResearch = async () => {
+  // Cleanup abort controller on unmount
+  useEffect(() => {
+    return () => {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    };
+  }, []);
+
+  const handleResearch = useCallback(async () => {
     setIsResearching(true);
     setError(null);
     setResults(null);
+    setLiveContacts([]);
     setSummary(null);
     setStages(null);
     setTiming(null);
+    setProgress({
+      phase: null,
+      phaseMessage: "Connecting...",
+      iteration: 0,
+      maxIterations: 10,
+      action: "",
+      contactsFoundSoFar: 0,
+    });
+
+    // Create abort controller for this request
+    abortControllerRef.current = new AbortController();
 
     try {
-      const response = await fetch("/api/research-contacts", {
+      const response = await fetch("/api/research-contacts-stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ companyId }),
+        signal: abortControllerRef.current.signal,
       });
 
-      const data = await response.json();
-
       if (!response.ok) {
-        throw new Error(data.error || "Research failed");
+        throw new Error(`Request failed: ${response.status}`);
       }
 
-      setResults(data.contacts || []);
-      setSummary(data.summary);
-      setStages(data.stages);
-      setTiming(data.timing);
+      if (!response.body) {
+        throw new Error("No response body");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        // Process complete SSE messages
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || ""; // Keep incomplete line in buffer
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              const event = JSON.parse(line.slice(6));
+              handleProgressEvent(event);
+            } catch (e) {
+              console.warn("Failed to parse SSE event:", line, e);
+            }
+          }
+        }
+      }
     } catch (err) {
+      if (err instanceof Error && err.name === "AbortError") {
+        // Request was cancelled, don't show error
+        return;
+      }
       setError(err instanceof Error ? err.message : "An error occurred");
     } finally {
       setIsResearching(false);
+      abortControllerRef.current = null;
     }
-  };
+  }, [companyId]);
+
+  // Handle progress events from SSE stream
+  const handleProgressEvent = useCallback((event: {
+    type: string;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    [key: string]: any;
+  }) => {
+    switch (event.type) {
+      case "started":
+        setProgress((prev) => ({
+          ...prev,
+          phaseMessage: `Starting research for ${event.companyName}...`,
+        }));
+        break;
+
+      case "phase":
+        setProgress((prev) => ({
+          ...prev,
+          phase: event.phase,
+          phaseMessage: event.message,
+        }));
+        break;
+
+      case "iteration":
+        setProgress((prev) => ({
+          ...prev,
+          iteration: event.iteration,
+          maxIterations: event.maxIterations,
+          action: event.action,
+        }));
+        break;
+
+      case "contact":
+        // Add contact to live results as they're discovered
+        setLiveContacts((prev) => {
+          // Avoid duplicates
+          if (prev.some((c) => c.email === event.contact.email)) {
+            return prev;
+          }
+          return [...prev, event.contact];
+        });
+        setProgress((prev) => ({
+          ...prev,
+          contactsFoundSoFar: prev.contactsFoundSoFar + 1,
+        }));
+        break;
+
+      case "complete":
+        setResults(event.result.contacts || []);
+        setSummary(event.result.summary);
+        setStages(event.result.stages);
+        setTiming({
+          researchMs: event.result.durationMs,
+          totalMs: event.result.durationMs,
+        });
+        setLiveContacts([]); // Clear live contacts since we have final results
+        break;
+
+      case "error":
+        setError(event.message);
+        break;
+    }
+  }, []);
 
   const handleAddContact = async (contact: DiscoveredContact) => {
     setAddingContact(contact.email);
@@ -186,6 +321,24 @@ export function ContactResearch({ companyId, companyName }: ContactResearchProps
     }
   };
 
+  const getPhaseIcon = (phase: string | null) => {
+    switch (phase) {
+      case "extracting":
+        return <Sparkles className="h-4 w-4 text-purple-500" />;
+      case "browsing":
+        return <Globe className="h-4 w-4 text-blue-500" />;
+      case "searching":
+        return <Search className="h-4 w-4 text-green-500" />;
+      default:
+        return <Timer className="h-4 w-4 text-blue-500 animate-pulse" />;
+    }
+  };
+
+  // Calculate progress percentage based on iteration
+  const progressPercent = progress.maxIterations > 0
+    ? Math.min((progress.iteration / progress.maxIterations) * 100, 95)
+    : 0;
+
   return (
     <Card>
       <CardHeader>
@@ -207,7 +360,7 @@ export function ContactResearch({ companyId, companyName }: ContactResearchProps
           {isResearching ? (
             <>
               <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-              Researching website...
+              Researching...
             </>
           ) : (
             <>
@@ -217,42 +370,71 @@ export function ContactResearch({ companyId, companyName }: ContactResearchProps
           )}
         </Button>
 
-        {/* Progress indicator during research */}
+        {/* Real-time progress indicator during research */}
         {isResearching && (
           <div className="space-y-3 border rounded-lg p-4 bg-muted/30">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 text-sm font-medium">
-                <Timer className="h-4 w-4 text-blue-500 animate-pulse" />
-                <span>Research in progress...</span>
+                {getPhaseIcon(progress.phase)}
+                <span>{progress.phaseMessage || "Starting research..."}</span>
               </div>
               <div className="text-sm font-mono text-muted-foreground">
                 {elapsedTime}s
               </div>
             </div>
 
-            {/* Progress bar */}
-            <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
-              <div
-                className="h-full bg-blue-500 transition-all duration-1000 ease-out"
-                style={{
-                  width: `${Math.min((elapsedTime / 50) * 100, 95)}%`,
-                }}
-              />
+            {/* Iteration-based progress bar */}
+            <div className="space-y-1">
+              <div className="w-full h-2 bg-muted rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-blue-500 transition-all duration-300 ease-out"
+                  style={{ width: `${progressPercent}%` }}
+                />
+              </div>
+              {progress.iteration > 0 && (
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span>
+                    Iteration {progress.iteration}/{progress.maxIterations}
+                  </span>
+                  {progress.contactsFoundSoFar > 0 && (
+                    <span className="flex items-center gap-1">
+                      <Zap className="h-3 w-3 text-yellow-500" />
+                      {progress.contactsFoundSoFar} contact(s) found
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
 
-            <div className="text-xs text-muted-foreground space-y-1">
-              <p>
-                {elapsedTime < 5 && "Connecting to company website..."}
-                {elapsedTime >= 5 && elapsedTime < 12 && "Browsing pages for contacts..."}
-                {elapsedTime >= 12 && elapsedTime < 20 && "Detecting email patterns..."}
-                {elapsedTime >= 20 && elapsedTime < 30 && "Applying patterns to executives..."}
-                {elapsedTime >= 30 && elapsedTime < 40 && "Verifying emails via OSINT..."}
-                {elapsedTime >= 40 && "Finalizing results..."}
-              </p>
-              <p className="text-muted-foreground/60">
-                This typically takes 20-45 seconds
-              </p>
-            </div>
+            {/* Current action */}
+            {progress.action && (
+              <div className="text-xs text-muted-foreground truncate">
+                {progress.action}
+              </div>
+            )}
+
+            {/* Live discovered contacts preview */}
+            {liveContacts.length > 0 && (
+              <div className="mt-2 pt-2 border-t">
+                <div className="text-xs font-medium text-muted-foreground mb-2">
+                  Discovered so far:
+                </div>
+                <div className="space-y-1">
+                  {liveContacts.slice(0, 3).map((contact, i) => (
+                    <div key={i} className="text-xs text-muted-foreground flex items-center gap-2">
+                      <CheckCircle className="h-3 w-3 text-green-500" />
+                      <span className="truncate">{contact.name}</span>
+                      <span className="text-muted-foreground/50">({contact.role})</span>
+                    </div>
+                  ))}
+                  {liveContacts.length > 3 && (
+                    <div className="text-xs text-muted-foreground/50">
+                      +{liveContacts.length - 3} more...
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -302,7 +484,7 @@ export function ContactResearch({ companyId, companyName }: ContactResearchProps
                 <div className="space-y-1">
                   {stages.pagesVisited.slice(0, 5).map((url, i) => (
                     <div key={i} className="text-xs text-muted-foreground/70 truncate">
-                      • {url}
+                      {url}
                     </div>
                   ))}
                   {stages.pagesVisited.length > 5 && (
