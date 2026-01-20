@@ -2,8 +2,8 @@ import { NextRequest } from "next/server";
 import { prisma } from "@/lib/db";
 import { researchContacts, ProgressEvent } from "@/lib/contact-research-agent";
 
-// Vercel serverless timeout - allow more time for streaming
-export const maxDuration = 55;
+// Vercel Pro allows up to 300s - give agent plenty of time
+export const maxDuration = 300;
 
 // Disable static optimization for streaming
 export const dynamic = "force-dynamic";
