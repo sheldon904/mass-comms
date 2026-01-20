@@ -129,15 +129,53 @@ function extractCompanyDomain(research: string, companyName: string): string | n
 // KEY PEOPLE EXTRACTION FROM RESEARCH DOC
 // ============================================================================
 
-function extractTargetPeople(research: string): TargetPerson[] {
+// Priority order for roles (lower = higher priority)
+const ROLE_PRIORITY: Record<string, number> = {
+  "CEO": 1,
+  "President": 2,
+  "Owner": 3,
+  "Founder": 4,
+  "Co-Founder": 5,
+  "CFO": 6,
+  "COO": 7,
+  "CTO": 8,
+  "CMO": 9,
+  "Managing Partner": 10,
+  "Executive Director": 11,
+  "General Manager": 12,
+  "Chairman": 13,
+  "Vice President": 20,
+  "Partner": 21,
+  "Director": 22,
+  "Board Member": 25,
+};
+
+const MAX_TARGETS = 6; // Limit to prevent timeout
+
+function extractTargetPeople(research: string, companyName: string): TargetPerson[] {
   const targets: TargetPerson[] = [];
   const seen = new Set<string>();
 
-  // Common executive title patterns
+  // Clean company name for context matching
+  const companyNameLower = companyName.toLowerCase();
+  const companyWords = companyNameLower.split(/\s+/).filter(w => w.length > 2);
+
+  // HIGH PRIORITY titles only - skip generic ones
+  const highPriorityTitles = "CEO|Chief Executive Officer|President|Founder|Co-Founder|Owner|CFO|Chief Financial Officer|COO|Chief Operating Officer|CTO|Chief Technology Officer";
+
   const titlePatterns = [
-    /([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:[-'][A-Z][a-z]+)?)\s*[,\-–]?\s*(?:the\s+)?(?:is\s+)?(?:as\s+)?(CEO|Chief Executive Officer|President|Founder|Co-Founder|Owner|CFO|Chief Financial Officer|COO|Chief Operating Officer|CTO|Chief Technology Officer|CMO|Chief Marketing Officer|VP|Vice President|Director|Managing Partner|Partner|General Manager|Executive Director|Chairman|Board Member)/gi,
-    /(CEO|Chief Executive Officer|President|Founder|Co-Founder|Owner|CFO|Chief Financial Officer|COO|Chief Operating Officer|CTO|Chief Technology Officer|CMO|Chief Marketing Officer|VP|Vice President|Director|Managing Partner|Partner|General Manager|Executive Director|Chairman)[:\s,\-–]+([A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+(?:[-'][A-Z][a-z]+)?)/gi,
+    new RegExp(`([A-Z][a-z]+(?:\\s+[A-Z]\\.?)?\\s+[A-Z][a-z]+(?:[-'][A-Z][a-z]+)?)\\s*[,\\-–]?\\s*(?:the\\s+)?(?:is\\s+)?(?:as\\s+)?(${highPriorityTitles})`, "gi"),
+    new RegExp(`(${highPriorityTitles})[:\\s,\\-–]+([A-Z][a-z]+(?:\\s+[A-Z]\\.?)?\\s+[A-Z][a-z]+(?:[-'][A-Z][a-z]+)?)`, "gi"),
   ];
+
+  // Look for names near company mentions (within ~200 chars)
+  // This helps filter to only the TARGET company's executives
+  const companyMentionRegex = new RegExp(companyWords.join("|"), "gi");
+  const companyMentions: number[] = [];
+  let companyMatch;
+  while ((companyMatch = companyMentionRegex.exec(research)) !== null) {
+    companyMentions.push(companyMatch.index);
+  }
 
   for (const pattern of titlePatterns) {
     let match;
@@ -146,7 +184,7 @@ function extractTargetPeople(research: string): TargetPerson[] {
       let role: string;
 
       // Check which capture group has the name vs role
-      if (/^(CEO|Chief|President|Founder|Owner|CFO|COO|CTO|CMO|VP|Vice|Director|Managing|Partner|General|Executive|Chairman|Board)/i.test(match[1])) {
+      if (/^(CEO|Chief|President|Founder|Owner|CFO|COO|CTO|CMO)/i.test(match[1])) {
         role = match[1];
         name = match[2];
       } else {
@@ -165,6 +203,18 @@ function extractTargetPeople(research: string): TargetPerson[] {
       if (/[0-9@#$%^&*()+=\[\]{}|\\/<>]/.test(name)) continue;
       if (/^(the|mr|mrs|ms|dr|sir)$/i.test(nameParts[0])) continue;
 
+      // Check if this match is near a company mention (within 300 chars)
+      const matchPos = match.index;
+      const isNearCompanyMention = companyMentions.some(
+        pos => Math.abs(pos - matchPos) < 300
+      );
+
+      // If we have company mentions and this isn't near one, skip it
+      // (unless we have very few results)
+      if (companyMentions.length > 0 && !isNearCompanyMention && targets.length >= 2) {
+        continue;
+      }
+
       const nameKey = name.toLowerCase();
       if (seen.has(nameKey)) continue;
       seen.add(nameKey);
@@ -182,8 +232,16 @@ function extractTargetPeople(research: string): TargetPerson[] {
     }
   }
 
-  console.log(`Extracted ${targets.length} target people from research:`, targets.map(t => `${t.name} (${t.role})`));
-  return targets;
+  // Sort by role priority and limit
+  targets.sort((a, b) => {
+    const prioA = ROLE_PRIORITY[a.role] || 99;
+    const prioB = ROLE_PRIORITY[b.role] || 99;
+    return prioA - prioB;
+  });
+
+  const limited = targets.slice(0, MAX_TARGETS);
+  console.log(`Extracted ${limited.length} target people (from ${targets.length} found):`, limited.map(t => `${t.name} (${t.role})`));
+  return limited;
 }
 
 function normalizeRole(role: string): string {
@@ -593,8 +651,8 @@ export async function researchContacts(params: ContactResearchParams): Promise<R
     };
   }
 
-  // PHASE 1: Extract target people from research document
-  const targetPeople = extractTargetPeople(companyResearch);
+  // PHASE 1: Extract target people from research document (max 6)
+  const targetPeople = extractTargetPeople(companyResearch, companyName);
   console.log(`Target executives to find: ${targetPeople.length}`);
 
   // Extract company domain
@@ -653,8 +711,8 @@ Submit contacts when done - include method (direct/pattern_matched/osint_verifie
     { role: "user", content: userPrompt }
   ];
 
-  // Agentic loop
-  const maxIterations = 8;
+  // Agentic loop - reduced for faster response
+  const maxIterations = 6;
   let iteration = 0;
   let shouldContinue = true;
 
@@ -662,8 +720,8 @@ Submit contacts when done - include method (direct/pattern_matched/osint_verifie
     iteration++;
     console.log(`Agent iteration ${iteration}...`);
 
-    // Check timeout (35 seconds)
-    if (Date.now() - startTime > 35000) {
+    // Check timeout (25 seconds - leave time for post-processing)
+    if (Date.now() - startTime > 25000) {
       console.log("Agent timeout - proceeding to pattern matching");
       break;
     }
@@ -812,8 +870,12 @@ Submit contacts when done - include method (direct/pattern_matched/osint_verifie
   }
 
   // POST-PROCESSING: Apply patterns to unfound targets
+  // Time budget: Must complete by 45s to avoid 55s Vercel timeout
+  const timeRemaining = 45000 - (Date.now() - startTime);
+  const canDoOsint = timeRemaining > 15000; // Need at least 15s for OSINT
+
   if (targetPeople.length > 0 && allEmailsFound.length > 0) {
-    console.log("Post-processing: Applying patterns to remaining targets...");
+    console.log(`Post-processing: ${timeRemaining}ms remaining, OSINT=${canDoOsint}`);
 
     // Detect patterns from found emails
     const patterns = detectEmailPatterns(Array.from(new Set(allEmailsFound)), domain);
@@ -829,10 +891,20 @@ Submit contacts when done - include method (direct/pattern_matched/osint_verifie
       console.log(`Applying pattern to ${unfoundTargets.length} unfound targets`);
 
       for (const target of unfoundTargets) {
+        // Bail out if running low on time
+        if (Date.now() - startTime > 48000) {
+          console.log("Time bailout - stopping pattern application");
+          break;
+        }
+
         const candidateEmail = applyEmailPattern(bestPattern, target);
 
-        // Try to verify via OSINT
-        const osintVerified = await verifyEmailOnline(candidateEmail, target.name, companyName);
+        // Only do OSINT verification if we have time
+        let osintVerified = false;
+        if (canDoOsint && Date.now() - startTime < 40000) {
+          osintVerified = await verifyEmailOnline(candidateEmail, target.name, companyName);
+        }
+
         const mxVerified = await verifyEmailDomain(candidateEmail);
 
         // Determine confidence

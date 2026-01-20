@@ -97,14 +97,28 @@ export async function POST(request: NextRequest) {
             };
           }
 
-          // Send via Resend
+          // Send via Resend with deliverability optimizations
           console.log(`[SEND API] Sending via Resend: to=${email.contact.email}, subject=${email.subject}`);
+
+          // Extract reply-to email from fromEmail (handles "Name <email>" format)
+          const replyToMatch = fromEmail.match(/<(.+)>/) || [null, fromEmail];
+          const replyToEmail = replyToMatch[1] || fromEmail;
 
           const { data, error } = await resend.emails.send({
             from: fromEmail,
             to: email.contact.email,
             subject: email.subject,
             text: email.body,
+            // Deliverability headers to avoid Promotions tab
+            replyTo: replyToEmail,
+            headers: {
+              // List-Unsubscribe helps with deliverability (Gmail looks for this)
+              "List-Unsubscribe": `<mailto:${replyToEmail}?subject=Unsubscribe>`,
+              // Precedence: bulk can sometimes help, but removing it may be better
+              // Using "normal" to indicate this is regular correspondence
+              "X-Priority": "3",
+              "X-Mailer": "Mass Comms",
+            },
           });
 
           if (error) {
