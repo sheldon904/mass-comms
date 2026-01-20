@@ -36,16 +36,30 @@ export interface ContactResearchParams {
   companyDomain?: string;
 }
 
+interface KeyPerson {
+  name: string;
+  role: string;
+}
+
+interface ResearchPlan {
+  keyPeople: KeyPerson[];
+  companyDescription: string;
+  suggestedPages: string[];
+}
+
 // ============================================================================
-// CONFIGURATION - Time management for Vercel serverless
+// CONFIGURATION
 // ============================================================================
 
-// Vercel has 55s max, we use 45s internal to leave buffer for response
-const INTERNAL_TIMEOUT_MS = 45000;
-const ITERATION_TIME_CHECK_MS = 5000; // Check time every iteration
+// Vercel has 55s max - we use generous internal timeout
+const INTERNAL_TIMEOUT_MS = 50000;
+
+// Rate limit handling
+const MAX_RETRIES = 3;
+const BASE_RETRY_DELAY_MS = 2000;
 
 // ============================================================================
-// DOMAIN EXTRACTION - Smart domain detection from research doc
+// DOMAIN EXTRACTION
 // ============================================================================
 
 function extractCompanyDomain(research: string, companyName: string): string | null {
@@ -55,7 +69,6 @@ function extractCompanyDomain(research: string, companyName: string): string | n
     .replace(/(inc|llc|ltd|corp|company|co|group|holdings)$/i, "")
     .trim();
 
-  // Domains to skip (news sites, social media, etc.)
   const skipDomains = new Set([
     "prnewswire.com", "businesswire.com", "globenewswire.com", "prweb.com",
     "marketwatch.com", "reuters.com", "bloomberg.com", "wsj.com", "nytimes.com",
@@ -121,7 +134,7 @@ function extractCompanyDomain(research: string, companyName: string): string | n
 }
 
 // ============================================================================
-// WEB BROWSING - Fetch webpage content
+// WEB BROWSING
 // ============================================================================
 
 async function fetchWebpage(url: string): Promise<{ success: boolean; content: string; error?: string }> {
@@ -131,7 +144,7 @@ async function fetchWebpage(url: string): Promise<{ success: boolean; content: s
     }
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout per page
+    const timeoutId = setTimeout(() => controller.abort(), 12000);
 
     const response = await fetch(url, {
       signal: controller.signal,
@@ -149,8 +162,8 @@ async function fetchWebpage(url: string): Promise<{ success: boolean; content: s
 
     const html = await response.text();
     const content = extractTextFromHtml(html);
-    const truncated = content.length > 20000
-      ? content.substring(0, 20000) + "\n...[truncated]"
+    const truncated = content.length > 15000
+      ? content.substring(0, 15000) + "\n...[truncated]"
       : content;
 
     return { success: true, content: truncated };
@@ -165,15 +178,12 @@ function extractTextFromHtml(html: string): string {
   text = text.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "");
   text = text.replace(/<noscript[^>]*>[\s\S]*?<\/noscript>/gi, "");
 
-  // Extract emails
   const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
   const emails = html.match(emailRegex) || [];
 
-  // Extract phone numbers
   const phoneRegex = /(?:\+?1[-.\s]?)?\(?[0-9]{3}\)?[-.\s]?[0-9]{3}[-.\s]?[0-9]{4}/g;
   const phones = html.match(phoneRegex) || [];
 
-  // Extract links for navigation
   const links: string[] = [];
   const linkRegex = /<a[^>]+href=["']([^"']+)["'][^>]*>([^<]*)<\/a>/gi;
   let match;
@@ -185,7 +195,6 @@ function extractTextFromHtml(html: string): string {
     }
   }
 
-  // Convert HTML to text
   text = text.replace(/<br\s*\/?>/gi, "\n");
   text = text.replace(/<\/p>/gi, "\n\n");
   text = text.replace(/<\/div>/gi, "\n");
@@ -202,14 +211,14 @@ function extractTextFromHtml(html: string): string {
   text = text.replace(/\n\s+/g, "\n");
   text = text.trim();
 
-  let result = "=== PAGE CONTENT ===\n" + text.substring(0, 12000);
+  let result = "=== PAGE CONTENT ===\n" + text.substring(0, 10000);
 
   if (emails.length > 0) {
-    result += "\n\n=== EMAILS FOUND ON PAGE ===\n" + Array.from(new Set(emails)).join("\n");
+    result += "\n\n=== EMAILS FOUND ===\n" + Array.from(new Set(emails)).join("\n");
   }
 
   if (phones.length > 0) {
-    result += "\n\n=== PHONE NUMBERS FOUND ===\n" + Array.from(new Set(phones)).join("\n");
+    result += "\n\n=== PHONES FOUND ===\n" + Array.from(new Set(phones)).join("\n");
   }
 
   const relevantLinks = links.filter(link => {
@@ -222,14 +231,14 @@ function extractTextFromHtml(html: string): string {
   });
 
   if (relevantLinks.length > 0) {
-    result += "\n\n=== RELEVANT LINKS TO EXPLORE ===\n" + relevantLinks.slice(0, 15).join("\n");
+    result += "\n\n=== RELEVANT LINKS ===\n" + relevantLinks.slice(0, 10).join("\n");
   }
 
   return result;
 }
 
 // ============================================================================
-// OSINT WEB SEARCH - Search for person's email online
+// OSINT WEB SEARCH
 // ============================================================================
 
 async function webSearch(query: string): Promise<{ success: boolean; results: string; error?: string }> {
@@ -237,7 +246,7 @@ async function webSearch(query: string): Promise<{ success: boolean; results: st
     const searchUrl = `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
 
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 8000); // 8s timeout for search
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
 
     const response = await fetch(searchUrl, {
       signal: controller.signal,
@@ -255,20 +264,18 @@ async function webSearch(query: string): Promise<{ success: boolean; results: st
 
     const html = await response.text();
 
-    // Extract search results text and any emails found
     let text = html.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "");
     text = text.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, "");
     text = text.replace(/<[^>]+>/g, " ");
     text = text.replace(/\s+/g, " ").trim();
 
-    // Find any emails in search results
     const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
     const emails = text.match(emailRegex) || [];
 
-    let result = text.length > 6000 ? text.substring(0, 6000) : text;
+    let result = text.length > 4000 ? text.substring(0, 4000) : text;
 
     if (emails.length > 0) {
-      result += "\n\n=== EMAILS FOUND IN SEARCH RESULTS ===\n" + Array.from(new Set(emails)).join("\n");
+      result += "\n\n=== EMAILS IN RESULTS ===\n" + Array.from(new Set(emails)).join("\n");
     }
 
     return { success: true, results: result };
@@ -279,7 +286,7 @@ async function webSearch(query: string): Promise<{ success: boolean; results: st
 }
 
 // ============================================================================
-// DNS / MX VERIFICATION
+// DNS VERIFICATION
 // ============================================================================
 
 const mxCache = new Map<string, boolean>();
@@ -304,41 +311,141 @@ async function verifyEmailDomain(email: string): Promise<boolean> {
 }
 
 // ============================================================================
-// AGENT TOOLS - Multi-tool agent architecture
+// RATE-LIMITED API CALL WITH RETRY
+// ============================================================================
+
+async function callAnthropicWithRetry(
+  anthropic: Anthropic,
+  params: Anthropic.MessageCreateParamsNonStreaming,
+  startTime: number
+): Promise<Anthropic.Message | null> {
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    // Check if we have time for a retry
+    const elapsed = Date.now() - startTime;
+    if (elapsed > INTERNAL_TIMEOUT_MS - 5000) {
+      console.log("[API] Not enough time for retry");
+      return null;
+    }
+
+    try {
+      const response = await anthropic.messages.create(params);
+      return response as Anthropic.Message;
+    } catch (error) {
+      const isRateLimit = error instanceof Error &&
+        (error.message.includes("429") || error.message.includes("rate_limit"));
+
+      if (isRateLimit && attempt < MAX_RETRIES - 1) {
+        // Exponential backoff with jitter
+        const delay = BASE_RETRY_DELAY_MS * Math.pow(2, attempt) + Math.random() * 1000;
+        console.log(`[API] Rate limited, waiting ${Math.round(delay)}ms before retry ${attempt + 1}...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+
+      console.error(`[API] Error:`, error instanceof Error ? error.message : error);
+      return null;
+    }
+  }
+
+  return null;
+}
+
+// ============================================================================
+// PHASE 1: EXTRACT KEY INFO FROM RESEARCH (Single API call)
+// ============================================================================
+
+async function extractKeyInfo(
+  anthropic: Anthropic,
+  companyName: string,
+  companyResearch: string,
+  startTime: number
+): Promise<ResearchPlan | null> {
+  console.log("[Phase 1] Extracting key info from research doc...");
+
+  // Truncate research doc to prevent rate limit issues (max ~8000 chars)
+  const truncatedResearch = companyResearch.length > 8000
+    ? companyResearch.substring(0, 8000) + "\n...[truncated]"
+    : companyResearch;
+
+  const response = await callAnthropicWithRetry(anthropic, {
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 1000,
+    system: "You extract key information from company research documents. Be concise. Return valid JSON only.",
+    messages: [{
+      role: "user",
+      content: `Extract key people and info from this research about ${companyName}:
+
+${truncatedResearch}
+
+Return JSON:
+{
+  "keyPeople": [{"name": "Full Name", "role": "CEO/President/etc"}],
+  "companyDescription": "One sentence description",
+  "suggestedPages": ["about", "team", "contact"]
+}
+
+Rules:
+- Only include REAL people with specific names (not generic titles)
+- Maximum 6 key people (prioritize executives: CEO, President, Owner, Founder)
+- Keep descriptions short
+- Return ONLY valid JSON, no markdown`
+    }]
+  }, startTime);
+
+  if (!response) {
+    console.log("[Phase 1] Failed to get response");
+    return null;
+  }
+
+  try {
+    const textBlock = response.content.find(b => b.type === "text");
+    if (!textBlock || textBlock.type !== "text") return null;
+
+    // Clean the response - remove markdown code blocks if present
+    let jsonText = textBlock.text.trim();
+    if (jsonText.startsWith("```")) {
+      jsonText = jsonText.replace(/^```json?\n?/, "").replace(/\n?```$/, "");
+    }
+
+    const plan = JSON.parse(jsonText) as ResearchPlan;
+    console.log(`[Phase 1] Found ${plan.keyPeople.length} key people:`, plan.keyPeople.map(p => p.name));
+    return plan;
+  } catch (e) {
+    console.error("[Phase 1] Failed to parse response:", e);
+    return null;
+  }
+}
+
+// ============================================================================
+// PHASE 2: AGENTIC BROWSING (Lightweight prompts)
 // ============================================================================
 
 const agentTools: Anthropic.Tool[] = [
   {
     name: "browse_webpage",
-    description: "Fetch and read the content of a webpage. Returns the page text, any emails found, phone numbers found, and links to explore. Use this to browse the company website.",
+    description: "Fetch webpage content including emails and phones found.",
     input_schema: {
       type: "object" as const,
       properties: {
-        url: {
-          type: "string",
-          description: "Full URL to fetch (e.g., https://example.com/about)"
-        }
+        url: { type: "string", description: "URL to fetch" }
       },
       required: ["url"]
     }
   },
   {
     name: "web_search",
-    description: "Search the internet for information. Use this to verify contacts exist, find email addresses, or research specific people. Good for OSINT verification.",
+    description: "Search internet for contact info. Use for OSINT verification.",
     input_schema: {
       type: "object" as const,
       properties: {
-        query: {
-          type: "string",
-          description: "Search query (e.g., 'John Smith Acme Corp email' or '\"john.smith@acme.com\"')"
-        }
+        query: { type: "string", description: "Search query" }
       },
       required: ["query"]
     }
   },
   {
     name: "submit_contacts",
-    description: "Submit discovered contacts. Include HOW you found each contact (found_method). Submit as you find contacts - don't wait until the end.",
+    description: "Submit discovered contacts with their source.",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -347,16 +454,12 @@ const agentTools: Anthropic.Tool[] = [
           items: {
             type: "object",
             properties: {
-              name: { type: "string", description: "Full name of the contact" },
-              email: { type: "string", description: "Email address" },
-              phone: { type: ["string", "null"], description: "Phone number if found" },
-              role: { type: "string", description: "Job title or role" },
-              found_method: {
-                type: "string",
-                enum: ["direct_website", "osint_search", "pattern_match"],
-                description: "How this contact was discovered: direct_website (found on company site), osint_search (found via web search), pattern_match (email guessed from pattern)"
-              },
-              source: { type: "string", description: "Where the contact was found (URL or search query)" }
+              name: { type: "string" },
+              email: { type: "string" },
+              phone: { type: ["string", "null"] },
+              role: { type: "string" },
+              found_method: { type: "string", enum: ["direct_website", "osint_search", "pattern_match"] },
+              source: { type: "string" }
             },
             required: ["name", "email", "role", "found_method", "source"]
           }
@@ -368,7 +471,7 @@ const agentTools: Anthropic.Tool[] = [
 ];
 
 // ============================================================================
-// MAIN RESEARCH FUNCTION - Full context agent architecture
+// MAIN RESEARCH FUNCTION
 // ============================================================================
 
 export async function researchContacts(params: ContactResearchParams): Promise<ResearchResult> {
@@ -388,9 +491,8 @@ export async function researchContacts(params: ContactResearchParams): Promise<R
     };
   }
 
-  // Extract company domain
   const domain = params.companyDomain || extractCompanyDomain(companyResearch, companyName);
-  console.log(`Company domain: ${domain}`);
+  console.log(`[Research] Company: ${companyName}, Domain: ${domain}`);
 
   if (!domain) {
     return {
@@ -404,69 +506,43 @@ export async function researchContacts(params: ContactResearchParams): Promise<R
   const anthropic = new Anthropic({ apiKey });
 
   // =========================================================================
-  // SYSTEM PROMPT - Full research document as context (NO regex preprocessing)
+  // PHASE 1: Extract key info (single API call with truncated doc)
   // =========================================================================
-  const systemPrompt = `You are an expert contact researcher. Your job is to find real, verified contact information for key people at ${companyName}.
+  const plan = await extractKeyInfo(anthropic, companyName, companyResearch, startTime);
 
-## COMPANY RESEARCH DOCUMENT
-The following is the complete research document about this company. Read it carefully to understand who the key people are:
-
----
-${companyResearch}
----
-
-## YOUR MISSION
-1. Identify the KEY PEOPLE from the research document above (executives, founders, owners, key staff)
-2. Find their REAL contact information using the tools available
-3. Submit verified contacts as you find them
-
-## COMPANY WEBSITE
-Domain: ${domain}
-Start browsing at: https://${domain}
-
-## TOOLS AVAILABLE
-- browse_webpage: Fetch pages from the company website
-- web_search: Search the internet for contact info (OSINT)
-- submit_contacts: Submit discovered contacts
-
-## STRATEGY
-1. Browse the company homepage first
-2. Look for team/about/contact/leadership pages
-3. For any key people mentioned but without emails, use web_search to find their email
-4. When you find departmental contacts (info@, sales@, recruiting@), submit those too - they're valuable
-
-## CONFIDENCE LEVELS (based on found_method)
-- direct_website: HIGH confidence - found directly on company website
-- osint_search: MEDIUM confidence - verified via web search
-- pattern_match: LOW confidence - guessed from email pattern
-
-## RULES
-- NEVER invent or hallucinate email addresses
-- If you can't find an email, don't submit that contact
-- Submit contacts AS YOU FIND THEM - don't wait
-- Departmental emails (info@, hr@, etc.) are valuable - submit them
-- You have about 40 seconds total - work efficiently
-
-## TIME MANAGEMENT
-Work efficiently. Prioritize:
-1. Direct finds on website (highest value)
-2. OSINT verification for key executives
-3. Pattern matching only as last resort`;
-
-  const userPrompt = `Find contacts for ${companyName}.
-
-Start by browsing https://${domain} to understand the company and find any contact information.
-Then explore relevant pages (team, about, contact, leadership).
-Use web_search to verify or find emails for key people.
-Submit contacts as you find them.`;
-
-  const messages: Anthropic.MessageParam[] = [
-    { role: "user", content: userPrompt }
-  ];
+  const keyPeopleList = plan?.keyPeople && plan.keyPeople.length > 0
+    ? plan.keyPeople.map(p => `${p.name} (${p.role})`).join(", ")
+    : "executives and key staff";
 
   // =========================================================================
-  // AGENTIC LOOP - Time-based iteration management
+  // PHASE 2: Agentic browsing with LIGHTWEIGHT prompts
   // =========================================================================
+
+  // Compact system prompt - no research doc, just key info
+  const systemPrompt = `You find contacts for ${companyName} (${domain}).
+
+KEY PEOPLE TO FIND: ${keyPeopleList}
+
+TOOLS: browse_webpage, web_search, submit_contacts
+
+STRATEGY:
+1. Browse https://${domain} and team/about/contact pages
+2. Submit contacts AS YOU FIND THEM (don't wait)
+3. For key people without emails, use web_search to find them
+4. Departmental emails (info@, hr@) are valuable too
+
+CONFIDENCE:
+- direct_website = HIGH (found on company site)
+- osint_search = MEDIUM (found via search)
+- pattern_match = LOW (guessed)
+
+NEVER invent emails. Only submit real ones you find.`;
+
+  const messages: Anthropic.MessageParam[] = [{
+    role: "user",
+    content: `Find contacts for ${companyName}. Start with https://${domain}`
+  }];
+
   let iteration = 0;
   let shouldContinue = true;
   let noToolCallCount = 0;
@@ -478,184 +554,169 @@ Submit contacts as you find them.`;
 
     console.log(`[Agent] Iteration ${iteration}, elapsed: ${Math.round(elapsed/1000)}s, remaining: ${Math.round(remaining/1000)}s`);
 
-    // Time-based bailout
-    if (remaining < ITERATION_TIME_CHECK_MS) {
-      console.log("[Agent] Time limit approaching - stopping");
+    // Time check - need at least 8s for an iteration
+    if (remaining < 8000) {
+      console.log("[Agent] Time limit - stopping");
       break;
     }
 
-    // Safety: max iterations
-    if (iteration > 15) {
+    // Safety limit
+    if (iteration > 12) {
       console.log("[Agent] Max iterations reached");
       break;
     }
 
-    try {
-      const response = await anthropic.messages.create({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 4000,
-        system: systemPrompt,
-        tools: agentTools,
-        messages
-      });
+    const response = await callAnthropicWithRetry(anthropic, {
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 2000,
+      system: systemPrompt,
+      tools: agentTools,
+      messages
+    }, startTime);
 
-      const toolUseBlocks = response.content.filter(
-        (block): block is Anthropic.ToolUseBlock => block.type === "tool_use"
-      );
+    if (!response) {
+      console.log("[Agent] No response - stopping");
+      break;
+    }
 
-      // If no tool calls, agent is done
-      if (toolUseBlocks.length === 0) {
-        noToolCallCount++;
-        if (noToolCallCount >= 2) {
-          console.log("[Agent] No tool calls - agent finished");
-          shouldContinue = false;
-          break;
-        }
-        // Add message and continue
-        messages.push({ role: "assistant", content: response.content });
-        messages.push({ role: "user", content: "Continue searching for contacts. Use the tools to browse pages or search for people." });
+    const toolUseBlocks = response.content.filter(
+      (block): block is Anthropic.ToolUseBlock => block.type === "tool_use"
+    );
+
+    if (toolUseBlocks.length === 0) {
+      noToolCallCount++;
+      if (noToolCallCount >= 2) {
+        console.log("[Agent] Agent finished");
+        break;
+      }
+      messages.push({ role: "assistant", content: response.content });
+      messages.push({ role: "user", content: "Continue searching. Use browse_webpage or web_search to find more contacts." });
+      continue;
+    }
+
+    noToolCallCount = 0;
+    const toolResults: Anthropic.ToolResultBlockParam[] = [];
+
+    for (const toolUse of toolUseBlocks) {
+      // Time check before each tool
+      if (Date.now() - startTime > INTERNAL_TIMEOUT_MS - 5000) {
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: toolUse.id,
+          content: "Time limit. Submit any contacts found."
+        });
         continue;
       }
 
-      noToolCallCount = 0;
-      const toolResults: Anthropic.ToolResultBlockParam[] = [];
+      if (toolUse.name === "browse_webpage") {
+        const input = toolUse.input as { url: string };
+        let url = input.url;
 
-      for (const toolUse of toolUseBlocks) {
-        // Check time before each tool call
-        if (Date.now() - startTime > INTERNAL_TIMEOUT_MS - 3000) {
-          console.log("[Agent] Time limit - skipping remaining tools");
+        // Validate domain
+        try {
+          const urlObj = new URL(url.startsWith("http") ? url : `https://${url}`);
+          const urlDomain = urlObj.hostname.replace("www.", "");
+          const targetDomain = domain.replace("www.", "");
+
+          if (!urlDomain.includes(targetDomain) && !targetDomain.includes(urlDomain)) {
+            console.log(`[Agent] Blocked: ${url}`);
+            toolResults.push({
+              type: "tool_result",
+              tool_use_id: toolUse.id,
+              content: `Can only browse ${domain}. Use web_search for external lookups.`
+            });
+            continue;
+          }
+        } catch {
           toolResults.push({
             type: "tool_result",
             tool_use_id: toolUse.id,
-            content: "Time limit reached. Please submit any contacts you've found."
+            content: "Invalid URL"
           });
           continue;
         }
 
-        if (toolUse.name === "browse_webpage") {
-          const input = toolUse.input as { url: string };
-          let url = input.url;
+        pagesVisited.push(url);
+        console.log(`[Agent] Browse: ${url}`);
+        const result = await fetchWebpage(url);
 
-          // Security: Validate URL is on company domain
-          try {
-            const urlObj = new URL(url.startsWith("http") ? url : `https://${url}`);
-            const urlDomain = urlObj.hostname.replace("www.", "");
-            const targetDomain = domain.replace("www.", "");
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: toolUse.id,
+          content: result.success ? result.content : `Error: ${result.error}`
+        });
 
-            if (!urlDomain.includes(targetDomain) && !targetDomain.includes(urlDomain)) {
-              console.log(`[Agent] Blocked: ${url} (not on ${domain})`);
-              toolResults.push({
-                type: "tool_result",
-                tool_use_id: toolUse.id,
-                content: `Error: Can only browse ${domain}. Use web_search for external lookups.`
-              });
-              continue;
-            }
-          } catch {
-            toolResults.push({
-              type: "tool_result",
-              tool_use_id: toolUse.id,
-              content: "Error: Invalid URL format"
-            });
-            continue;
+      } else if (toolUse.name === "web_search") {
+        const input = toolUse.input as { query: string };
+        searchesPerformed.push(input.query);
+        console.log(`[Agent] Search: ${input.query}`);
+
+        const result = await webSearch(input.query);
+
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: toolUse.id,
+          content: result.success ? result.results : `Error: ${result.error}`
+        });
+
+      } else if (toolUse.name === "submit_contacts") {
+        const input = toolUse.input as {
+          contacts: Array<{
+            name: string;
+            email: string;
+            phone?: string | null;
+            role: string;
+            found_method: "direct_website" | "osint_search" | "pattern_match";
+            source: string;
+          }>
+        };
+
+        let addedCount = 0;
+        const seenEmails = new Set(finalContacts.map(c => c.email.toLowerCase()));
+
+        for (const contact of input.contacts || []) {
+          if (seenEmails.has(contact.email.toLowerCase())) continue;
+          seenEmails.add(contact.email.toLowerCase());
+
+          const mxVerified = await verifyEmailDomain(contact.email);
+
+          let confidence: "high" | "medium" | "low";
+          if (contact.found_method === "direct_website" && mxVerified) {
+            confidence = "high";
+          } else if (contact.found_method === "osint_search") {
+            confidence = "medium";
+          } else {
+            confidence = "low";
           }
 
-          pagesVisited.push(url);
-          console.log(`[Agent] Browsing: ${url}`);
-          const result = await fetchWebpage(url);
-
-          toolResults.push({
-            type: "tool_result",
-            tool_use_id: toolUse.id,
-            content: result.success ? result.content : `Error fetching page: ${result.error}`
+          finalContacts.push({
+            name: contact.name,
+            email: contact.email,
+            phone: contact.phone || null,
+            role: contact.role,
+            confidence,
+            source: contact.source,
+            verified: mxVerified
           });
+          addedCount++;
 
-        } else if (toolUse.name === "web_search") {
-          const input = toolUse.input as { query: string };
-          searchesPerformed.push(input.query);
-          console.log(`[Agent] Searching: ${input.query}`);
-
-          const result = await webSearch(input.query);
-
-          toolResults.push({
-            type: "tool_result",
-            tool_use_id: toolUse.id,
-            content: result.success ? result.results : `Search error: ${result.error}`
-          });
-
-        } else if (toolUse.name === "submit_contacts") {
-          const input = toolUse.input as {
-            contacts: Array<{
-              name: string;
-              email: string;
-              phone?: string | null;
-              role: string;
-              found_method: "direct_website" | "osint_search" | "pattern_match";
-              source: string;
-            }>
-          };
-
-          let addedCount = 0;
-          const seenEmails = new Set(finalContacts.map(c => c.email.toLowerCase()));
-
-          for (const contact of input.contacts || []) {
-            // Skip duplicates
-            if (seenEmails.has(contact.email.toLowerCase())) {
-              continue;
-            }
-            seenEmails.add(contact.email.toLowerCase());
-
-            // Verify MX records
-            const mxVerified = await verifyEmailDomain(contact.email);
-
-            // Determine confidence based on found_method
-            let confidence: "high" | "medium" | "low";
-            if (contact.found_method === "direct_website" && mxVerified) {
-              confidence = "high";
-            } else if (contact.found_method === "osint_search") {
-              confidence = "medium";
-            } else {
-              confidence = "low";
-            }
-
-            finalContacts.push({
-              name: contact.name,
-              email: contact.email,
-              phone: contact.phone || null,
-              role: contact.role,
-              confidence,
-              source: contact.source,
-              verified: mxVerified
-            });
-            addedCount++;
-
-            console.log(`[Agent] Added: ${contact.name} <${contact.email}> (${confidence})`);
-          }
-
-          toolResults.push({
-            type: "tool_result",
-            tool_use_id: toolUse.id,
-            content: `Submitted ${addedCount} new contact(s). Total contacts: ${finalContacts.length}. Continue searching for more contacts if you haven't exhausted all options.`
-          });
+          console.log(`[Agent] Added: ${contact.name} <${contact.email}> (${confidence})`);
         }
-      }
 
-      messages.push({ role: "assistant", content: response.content });
-      messages.push({ role: "user", content: toolResults });
-
-    } catch (error) {
-      console.error("[Agent] Error:", error);
-      // On error, try to continue if we have time
-      if (Date.now() - startTime < INTERNAL_TIMEOUT_MS - 10000) {
-        messages.push({ role: "user", content: "There was an error. Please continue with your search." });
-      } else {
-        shouldContinue = false;
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: toolUse.id,
+          content: `Added ${addedCount} contact(s). Total: ${finalContacts.length}. Continue searching if time permits.`
+        });
       }
     }
+
+    messages.push({ role: "assistant", content: response.content });
+    messages.push({ role: "user", content: toolResults });
   }
 
   // =========================================================================
-  // FINAL RESULTS
+  // RESULTS
   // =========================================================================
   const durationMs = Date.now() - startTime;
   const phonesFound = finalContacts.filter(c => c.phone).length;
@@ -665,14 +726,14 @@ Submit contacts as you find them.`;
   const lowConfidence = finalContacts.filter(c => c.confidence === "low").length;
 
   let summary = `Found ${finalContacts.length} contact(s) for ${companyName}. `;
-  summary += `Browsed ${pagesVisited.length} page(s), ${searchesPerformed.length} OSINT search(es). `;
-  summary += `Confidence: ${highConfidence} high, ${mediumConfidence} medium, ${lowConfidence} low. `;
-  if (phonesFound > 0) summary += `${phonesFound} phone number(s).`;
+  summary += `Browsed ${pagesVisited.length} page(s), ${searchesPerformed.length} search(es). `;
+  summary += `Confidence: ${highConfidence} high, ${mediumConfidence} medium, ${lowConfidence} low.`;
+  if (phonesFound > 0) summary += ` ${phonesFound} phone(s).`;
 
   console.log(`[Research] Complete in ${Math.round(durationMs/1000)}s - ${finalContacts.length} contacts`);
 
   return {
-    contacts: finalContacts.slice(0, 20), // Max 20 contacts
+    contacts: finalContacts.slice(0, 20),
     summary,
     stages: {
       pagesVisited,
