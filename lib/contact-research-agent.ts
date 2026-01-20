@@ -140,95 +140,85 @@ const ROLE_PRIORITY: Record<string, number> = {
   "COO": 7,
   "CTO": 8,
   "CMO": 9,
-  "Managing Partner": 10,
-  "Executive Director": 11,
-  "General Manager": 12,
-  "Chairman": 13,
-  "Vice President": 20,
-  "Partner": 21,
-  "Director": 22,
-  "Board Member": 25,
 };
 
-const MAX_TARGETS = 6; // Limit to prevent timeout
+const MAX_TARGETS = 4; // Reduced to prevent timeout
+
+// Words that should NEVER be part of a name
+const INVALID_NAME_WORDS = new Set([
+  "the", "a", "an", "and", "or", "of", "to", "from", "in", "on", "at", "by", "for", "with",
+  "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+  "promoted", "transitioned", "appointed", "named", "became", "joined", "left",
+  "new", "former", "current", "acting", "interim", "senior", "junior", "chief",
+  "company", "business", "firm", "group", "inc", "llc", "corp", "corporation",
+  "approval", "rating", "revenue", "growth", "market", "industry", "sector",
+  "based", "located", "founded", "established", "headquartered",
+  "their", "our", "his", "her", "its", "who", "which", "that", "this",
+  "home", "care", "health", "services", "solutions", "management", "consulting",
+  "pinnacle", "ai", "tech", "digital", "global", "national", "regional",
+]);
 
 function extractTargetPeople(research: string, companyName: string): TargetPerson[] {
   const targets: TargetPerson[] = [];
   const seen = new Set<string>();
 
-  // Clean company name for context matching
-  const companyNameLower = companyName.toLowerCase();
-  const companyWords = companyNameLower.split(/\s+/).filter(w => w.length > 2);
-
-  // HIGH PRIORITY titles only - skip generic ones
-  const highPriorityTitles = "CEO|Chief Executive Officer|President|Founder|Co-Founder|Owner|CFO|Chief Financial Officer|COO|Chief Operating Officer|CTO|Chief Technology Officer";
-
-  const titlePatterns = [
-    new RegExp(`([A-Z][a-z]+(?:\\s+[A-Z]\\.?)?\\s+[A-Z][a-z]+(?:[-'][A-Z][a-z]+)?)\\s*[,\\-–]?\\s*(?:the\\s+)?(?:is\\s+)?(?:as\\s+)?(${highPriorityTitles})`, "gi"),
-    new RegExp(`(${highPriorityTitles})[:\\s,\\-–]+([A-Z][a-z]+(?:\\s+[A-Z]\\.?)?\\s+[A-Z][a-z]+(?:[-'][A-Z][a-z]+)?)`, "gi"),
+  // Simple, strict pattern: "FirstName LastName, CEO" or "CEO FirstName LastName"
+  // Only match proper names (capitalized, 2-15 chars each part)
+  const patterns = [
+    // Pattern: "John Smith, CEO" or "John Smith - CEO"
+    /([A-Z][a-z]{1,14})\s+([A-Z][a-z]{1,14})[\s,\-–]+(?:the\s+)?(CEO|President|Owner|Founder|Co-Founder|CFO|COO|CTO)/gi,
+    // Pattern: "CEO John Smith" or "CEO: John Smith"
+    /(CEO|President|Owner|Founder|Co-Founder|CFO|COO|CTO)[:\s,\-–]+([A-Z][a-z]{1,14})\s+([A-Z][a-z]{1,14})/gi,
   ];
 
-  // Look for names near company mentions (within ~200 chars)
-  // This helps filter to only the TARGET company's executives
-  const companyMentionRegex = new RegExp(companyWords.join("|"), "gi");
-  const companyMentions: number[] = [];
-  let companyMatch;
-  while ((companyMatch = companyMentionRegex.exec(research)) !== null) {
-    companyMentions.push(companyMatch.index);
-  }
-
-  for (const pattern of titlePatterns) {
+  for (const pattern of patterns) {
     let match;
     while ((match = pattern.exec(research)) !== null) {
-      let name: string;
+      let firstName: string;
+      let lastName: string;
       let role: string;
 
-      // Check which capture group has the name vs role
-      if (/^(CEO|Chief|President|Founder|Owner|CFO|COO|CTO|CMO)/i.test(match[1])) {
+      if (/^(CEO|President|Owner|Founder|Co-Founder|CFO|COO|CTO)/i.test(match[1])) {
+        // Pattern 2: Role FirstName LastName
         role = match[1];
-        name = match[2];
+        firstName = match[2];
+        lastName = match[3];
       } else {
-        name = match[1];
-        role = match[2];
+        // Pattern 1: FirstName LastName Role
+        firstName = match[1];
+        lastName = match[2];
+        role = match[3];
       }
 
-      // Clean up name
-      name = name.trim().replace(/[,\-–]$/, "").trim();
+      // Strict validation
+      const firstLower = firstName.toLowerCase();
+      const lastLower = lastName.toLowerCase();
 
-      // Validate name (must have at least 2 parts, reasonable length)
-      const nameParts = name.split(/\s+/);
-      if (nameParts.length < 2 || name.length < 5 || name.length > 40) continue;
-
-      // Skip if name contains weird characters or looks like a title
-      if (/[0-9@#$%^&*()+=\[\]{}|\\/<>]/.test(name)) continue;
-      if (/^(the|mr|mrs|ms|dr|sir)$/i.test(nameParts[0])) continue;
-
-      // Check if this match is near a company mention (within 300 chars)
-      const matchPos = match.index;
-      const isNearCompanyMention = companyMentions.some(
-        pos => Math.abs(pos - matchPos) < 300
-      );
-
-      // If we have company mentions and this isn't near one, skip it
-      // (unless we have very few results)
-      if (companyMentions.length > 0 && !isNearCompanyMention && targets.length >= 2) {
+      // Skip if either part is an invalid word
+      if (INVALID_NAME_WORDS.has(firstLower) || INVALID_NAME_WORDS.has(lastLower)) {
         continue;
       }
 
-      const nameKey = name.toLowerCase();
+      // Skip if first name is too short or looks like initials
+      if (firstName.length < 3) continue;
+
+      // Skip if last name is too short
+      if (lastName.length < 3) continue;
+
+      const fullName = `${firstName} ${lastName}`;
+      const nameKey = fullName.toLowerCase();
       if (seen.has(nameKey)) continue;
       seen.add(nameKey);
 
       // Normalize role
       role = normalizeRole(role);
 
-      // Extract first and last name
-      const firstName = nameParts[0].toLowerCase().replace(/[^a-z]/g, "");
-      const lastName = nameParts[nameParts.length - 1].toLowerCase().replace(/[^a-z]/g, "");
-
-      if (firstName.length >= 2 && lastName.length >= 2) {
-        targets.push({ name, role, firstName, lastName });
-      }
+      targets.push({
+        name: fullName,
+        role,
+        firstName: firstLower,
+        lastName: lastLower,
+      });
     }
   }
 
@@ -581,34 +571,22 @@ async function verifyEmailDomain(email: string): Promise<boolean> {
 // AGENTIC RESEARCH WITH PATTERN MATCHING
 // ============================================================================
 
+// Simplified agent tools - NO OSINT (too slow for serverless)
 const agentTools: Anthropic.Tool[] = [
   {
     name: "browse_webpage",
-    description: "Fetch and read a webpage. Returns text content, emails, phones, and relevant links found.",
+    description: "Fetch a webpage. Returns text content, emails found, phones found, and links.",
     input_schema: {
       type: "object" as const,
       properties: {
-        url: { type: "string", description: "The URL to fetch" }
+        url: { type: "string", description: "URL to fetch (must be on company domain)" }
       },
       required: ["url"]
     }
   },
   {
-    name: "search_person_email",
-    description: "Search the web for a specific person's email at a company. Use for OSINT verification.",
-    input_schema: {
-      type: "object" as const,
-      properties: {
-        person_name: { type: "string", description: "Full name of the person" },
-        company_name: { type: "string", description: "Company name" },
-        candidate_email: { type: "string", description: "Optional: A candidate email to verify" }
-      },
-      required: ["person_name", "company_name"]
-    }
-  },
-  {
     name: "submit_contacts",
-    description: "Submit discovered contacts. Include source and confidence for each.",
+    description: "Submit discovered contacts. ONLY submit contacts with REAL emails found on pages.",
     input_schema: {
       type: "object" as const,
       properties: {
@@ -621,11 +599,9 @@ const agentTools: Anthropic.Tool[] = [
               email: { type: "string" },
               phone: { type: ["string", "null"] },
               role: { type: "string" },
-              source_url: { type: "string" },
-              confidence: { type: "string", enum: ["high", "medium", "low"], description: "high=found directly, medium=verified via OSINT, low=pattern-matched only" },
-              method: { type: "string", description: "How the email was obtained: 'direct', 'pattern_matched', 'osint_verified'" }
+              source_url: { type: "string" }
             },
-            required: ["name", "email", "role", "source_url", "confidence", "method"]
+            required: ["name", "email", "role", "source_url"]
           }
         }
       },
@@ -675,44 +651,32 @@ export async function researchContacts(params: ContactResearchParams): Promise<R
     ? `\n\nTARGET EXECUTIVES FROM RESEARCH:\n${targetPeople.map(p => `- ${p.name} (${p.role})`).join("\n")}`
     : "";
 
-  const systemPrompt = `You are a contact research agent finding REAL contact information.
+  const systemPrompt = `You are a fast contact research agent. Find REAL emails on the company website.
 
 COMPANY: ${companyName}
 DOMAIN: ${domain}
 ${targetList}
 
-STRATEGY:
-1. Browse the company website to find ANY employee emails
-2. Look for team pages, about pages, contact pages, leadership pages
-3. When you find emails, note the pattern (e.g., first.last@domain.com)
-4. Use search_person_email tool to verify executive emails via OSINT
-5. Submit contacts with appropriate confidence levels
+RULES:
+1. Browse ONLY ${domain} - no other domains
+2. Look for: team page, about page, contact page, leadership page
+3. Extract REAL emails found on pages - never guess or make up emails
+4. You have MAX 3 page visits - be strategic
+5. Submit contacts when you find emails
 
-CONFIDENCE LEVELS:
-- HIGH: Email found directly on website
-- MEDIUM: Email verified via OSINT search
-- LOW: Email generated from pattern, unverified
+Submit ALL contacts with real emails - departmental emails are valuable too.`;
 
-IMPORTANT:
-- Only browse ${domain} website
-- You have MAX 6 page visits on the company site
-- Use search_person_email for OSINT verification of pattern-matched emails
-- Submit ALL contacts found: both departmental and individual`;
+  const userPrompt = `Find contacts for ${companyName} at https://${domain}
 
-  const userPrompt = `Find contacts for ${companyName}.
-
-Start by browsing https://${domain} and look for team/about/contact pages.
-Find real emails, detect the email pattern, and apply it to target executives.
-Verify pattern-matched emails using OSINT search.
-
-Submit contacts when done - include method (direct/pattern_matched/osint_verified).`;
+Browse the homepage first, then check team/about/contact pages.
+Submit any contacts you find with real emails.`;
 
   const messages: Anthropic.MessageParam[] = [
     { role: "user", content: userPrompt }
   ];
 
-  // Agentic loop - reduced for faster response
-  const maxIterations = 6;
+  // Agentic loop - VERY fast to avoid Vercel timeout
+  const maxIterations = 4;
   let iteration = 0;
   let shouldContinue = true;
 
@@ -720,9 +684,9 @@ Submit contacts when done - include method (direct/pattern_matched/osint_verifie
     iteration++;
     console.log(`Agent iteration ${iteration}...`);
 
-    // Check timeout (25 seconds - leave time for post-processing)
-    if (Date.now() - startTime > 25000) {
-      console.log("Agent timeout - proceeding to pattern matching");
+    // Check timeout (18 seconds - must leave time for response)
+    if (Date.now() - startTime > 18000) {
+      console.log("Agent timeout - returning results");
       break;
     }
 
@@ -750,29 +714,19 @@ Submit contacts when done - include method (direct/pattern_matched/osint_verifie
         if (toolUse.name === "submit_contacts") {
           const input = toolUse.input as { contacts: Array<{
             name: string; email: string; phone?: string | null;
-            role: string; source_url: string; confidence: string; method: string;
+            role: string; source_url: string;
           }> };
 
           for (const contact of input.contacts || []) {
             const mxVerified = await verifyEmailDomain(contact.email);
-
-            // Determine final confidence
-            let confidence: "high" | "medium" | "low" = "low";
-            if (contact.method === "direct" && mxVerified) {
-              confidence = "high";
-            } else if (contact.method === "osint_verified" || (contact.method === "pattern_matched" && mxVerified)) {
-              confidence = "medium";
-            } else {
-              confidence = "low";
-            }
 
             finalContacts.push({
               name: contact.name,
               email: contact.email,
               phone: contact.phone || null,
               role: contact.role,
-              confidence,
-              source: contact.source_url + (contact.method !== "direct" ? ` (${contact.method})` : ""),
+              confidence: mxVerified ? "high" : "medium",
+              source: contact.source_url,
               verified: mxVerified
             });
           }
@@ -795,7 +749,7 @@ Submit contacts when done - include method (direct/pattern_matched/osint_verifie
             toolResults.push({
               type: "tool_result",
               tool_use_id: toolUse.id,
-              content: `Error: Can only browse ${domain}. Use search_person_email for external searches.`
+              content: `Error: Can only browse ${domain}.`
             });
             continue;
           }
@@ -817,46 +771,6 @@ Submit contacts when done - include method (direct/pattern_matched/osint_verifie
             tool_use_id: toolUse.id,
             content: result.success ? result.content : `Error: ${result.error}`
           });
-
-        } else if (toolUse.name === "search_person_email") {
-          const input = toolUse.input as { person_name: string; company_name: string; candidate_email?: string };
-
-          console.log(`OSINT search for: ${input.person_name} at ${input.company_name}`);
-
-          const searchQuery = input.candidate_email
-            ? `"${input.candidate_email}" OR "${input.person_name}" "${input.company_name}" email`
-            : `"${input.person_name}" "${input.company_name}" email contact`;
-
-          const result = await osintWebSearch(searchQuery);
-
-          let response = "";
-          if (result.success) {
-            // Check if candidate email was found
-            if (input.candidate_email && result.results.toLowerCase().includes(input.candidate_email.toLowerCase())) {
-              response = `VERIFIED: Found ${input.candidate_email} in search results!\n\n${result.results.substring(0, 2000)}`;
-            } else {
-              // Look for any email patterns in results
-              const foundEmails = result.results.match(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g) || [];
-              const relevantEmails = foundEmails.filter(e =>
-                e.toLowerCase().includes(input.person_name.toLowerCase().split(" ")[1]) ||
-                e.toLowerCase().includes(domain.toLowerCase())
-              );
-
-              if (relevantEmails.length > 0) {
-                response = `Found potential emails: ${relevantEmails.join(", ")}\n\n${result.results.substring(0, 2000)}`;
-              } else {
-                response = `No direct email found. Search results:\n${result.results.substring(0, 2000)}`;
-              }
-            }
-          } else {
-            response = `Search failed: ${result.error}`;
-          }
-
-          toolResults.push({
-            type: "tool_result",
-            tool_use_id: toolUse.id,
-            content: response
-          });
         }
       }
 
@@ -869,61 +783,40 @@ Submit contacts when done - include method (direct/pattern_matched/osint_verifie
     }
   }
 
-  // POST-PROCESSING: Apply patterns to unfound targets
-  // Time budget: Must complete by 45s to avoid 55s Vercel timeout
-  const timeRemaining = 45000 - (Date.now() - startTime);
-  const canDoOsint = timeRemaining > 15000; // Need at least 15s for OSINT
-
-  if (targetPeople.length > 0 && allEmailsFound.length > 0) {
-    console.log(`Post-processing: ${timeRemaining}ms remaining, OSINT=${canDoOsint}`);
+  // POST-PROCESSING: Apply patterns to unfound targets (NO OSINT - too slow)
+  // Must complete quickly to avoid Vercel timeout
+  if (targetPeople.length > 0 && allEmailsFound.length > 0 && Date.now() - startTime < 30000) {
+    console.log("Post-processing: Applying email patterns...");
 
     // Detect patterns from found emails
     const patterns = detectEmailPatterns(Array.from(new Set(allEmailsFound)), domain);
 
     if (patterns.length > 0) {
       const bestPattern = patterns[0];
-      console.log(`Best pattern detected: ${bestPattern.pattern} (from ${bestPattern.example})`);
+      console.log(`Best pattern: ${bestPattern.pattern} (from ${bestPattern.example})`);
 
       // Find targets that weren't already found
       const foundNames = new Set(finalContacts.map(c => c.name.toLowerCase()));
       const unfoundTargets = targetPeople.filter(t => !foundNames.has(t.name.toLowerCase()));
 
-      console.log(`Applying pattern to ${unfoundTargets.length} unfound targets`);
-
       for (const target of unfoundTargets) {
-        // Bail out if running low on time
-        if (Date.now() - startTime > 48000) {
-          console.log("Time bailout - stopping pattern application");
-          break;
-        }
+        // Quick bail if running low on time
+        if (Date.now() - startTime > 35000) break;
 
         const candidateEmail = applyEmailPattern(bestPattern, target);
-
-        // Only do OSINT verification if we have time
-        let osintVerified = false;
-        if (canDoOsint && Date.now() - startTime < 40000) {
-          osintVerified = await verifyEmailOnline(candidateEmail, target.name, companyName);
-        }
-
         const mxVerified = await verifyEmailDomain(candidateEmail);
-
-        // Determine confidence
-        let confidence: "high" | "medium" | "low" = "low";
-        if (osintVerified) {
-          confidence = "medium";
-        }
 
         finalContacts.push({
           name: target.name,
           email: candidateEmail,
           phone: null,
           role: target.role,
-          confidence,
-          source: osintVerified ? "Pattern + OSINT verified" : `Pattern from ${bestPattern.example}`,
+          confidence: "low", // Pattern-matched = low confidence
+          source: `Pattern from ${bestPattern.example}`,
           verified: mxVerified
         });
 
-        console.log(`Added ${target.name}: ${candidateEmail} (${confidence})`);
+        console.log(`Added ${target.name}: ${candidateEmail} (low - pattern)`);
       }
     }
   }
