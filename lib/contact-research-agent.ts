@@ -317,6 +317,219 @@ async function verifyEmailDomain(email: string): Promise<boolean> {
 }
 
 // ============================================================================
+// EMAIL PATTERN DETECTION AND GENERATION
+// ============================================================================
+
+type EmailPattern =
+  | "firstname.lastname"    // john.smith@company.com
+  | "firstnamelastname"     // johnsmith@company.com
+  | "firstname_lastname"    // john_smith@company.com
+  | "firstname"             // john@company.com
+  | "flastname"             // jsmith@company.com
+  | "firstl"                // johns@company.com
+  | "lastname.firstname"    // smith.john@company.com
+  | "lastnameFirstname"     // smithjohn@company.com
+  | "firstinitial.lastname" // j.smith@company.com
+  | "unknown";
+
+interface DetectedPattern {
+  pattern: EmailPattern;
+  confidence: number;
+  examples: string[];
+}
+
+interface PatternContext {
+  detectedPattern: DetectedPattern | null;
+  companyDomain: string;
+  foundEmails: string[];
+}
+
+// Common generic emails to skip when detecting patterns
+const GENERIC_PREFIXES = new Set([
+  "info", "contact", "sales", "support", "help", "admin", "hr", "careers",
+  "jobs", "media", "press", "marketing", "billing", "accounts", "service",
+  "customerservice", "team", "hello", "enquiries", "office", "general",
+  "webmaster", "postmaster", "noreply", "no-reply", "donotreply"
+]);
+
+function isPersonalEmail(localPart: string): boolean {
+  // Skip generic/functional emails
+  if (GENERIC_PREFIXES.has(localPart.toLowerCase())) {
+    return false;
+  }
+  // Personal emails usually have letters and maybe dots/underscores
+  // and are not just numbers
+  return /^[a-zA-Z][a-zA-Z0-9._-]*[a-zA-Z]?$/.test(localPart) &&
+         localPart.length >= 3 &&
+         !/^\d+$/.test(localPart);
+}
+
+function detectEmailPattern(emails: string[], targetDomain: string): DetectedPattern | null {
+  // Filter to only emails from the target domain that look like personal emails
+  const relevantEmails = emails.filter(email => {
+    const [localPart, domain] = email.toLowerCase().split("@");
+    return domain === targetDomain.toLowerCase() && isPersonalEmail(localPart);
+  });
+
+  if (relevantEmails.length === 0) {
+    return null;
+  }
+
+  // Analyze patterns
+  const patterns: { pattern: EmailPattern; matches: string[] }[] = [
+    { pattern: "firstname.lastname", matches: [] },
+    { pattern: "firstnamelastname", matches: [] },
+    { pattern: "firstname_lastname", matches: [] },
+    { pattern: "firstname", matches: [] },
+    { pattern: "flastname", matches: [] },
+    { pattern: "firstl", matches: [] },
+    { pattern: "firstinitial.lastname", matches: [] },
+  ];
+
+  for (const email of relevantEmails) {
+    const localPart = email.split("@")[0].toLowerCase();
+
+    // firstname.lastname (most common corporate pattern)
+    if (/^[a-z]+\.[a-z]+$/.test(localPart)) {
+      patterns[0].matches.push(email);
+    }
+    // firstnamelastname
+    else if (/^[a-z]{6,}$/.test(localPart) && !localPart.includes(".") && !localPart.includes("_")) {
+      patterns[1].matches.push(email);
+    }
+    // firstname_lastname
+    else if (/^[a-z]+_[a-z]+$/.test(localPart)) {
+      patterns[2].matches.push(email);
+    }
+    // firstname only (short, single word)
+    else if (/^[a-z]{3,10}$/.test(localPart)) {
+      patterns[3].matches.push(email);
+    }
+    // flastname (initial + lastname)
+    else if (/^[a-z][a-z]{3,}$/.test(localPart) && localPart.length <= 12) {
+      patterns[4].matches.push(email);
+    }
+    // firstl (firstname + initial)
+    else if (/^[a-z]{3,}[a-z]$/.test(localPart) && localPart.length <= 10) {
+      patterns[5].matches.push(email);
+    }
+    // j.smith pattern
+    else if (/^[a-z]\.[a-z]+$/.test(localPart)) {
+      patterns[6].matches.push(email);
+    }
+  }
+
+  // Find the pattern with most matches
+  patterns.sort((a, b) => b.matches.length - a.matches.length);
+
+  const bestPattern = patterns[0];
+  if (bestPattern.matches.length > 0) {
+    // Confidence based on how many examples we found
+    const confidence = Math.min(bestPattern.matches.length * 30, 90);
+    return {
+      pattern: bestPattern.pattern,
+      confidence,
+      examples: bestPattern.matches.slice(0, 3)
+    };
+  }
+
+  return null;
+}
+
+function generateEmailFromPattern(
+  firstName: string,
+  lastName: string,
+  pattern: EmailPattern,
+  domain: string
+): string | null {
+  const first = firstName.toLowerCase().replace(/[^a-z]/g, "");
+  const last = lastName.toLowerCase().replace(/[^a-z]/g, "");
+
+  if (!first || !last) return null;
+
+  switch (pattern) {
+    case "firstname.lastname":
+      return `${first}.${last}@${domain}`;
+    case "firstnamelastname":
+      return `${first}${last}@${domain}`;
+    case "firstname_lastname":
+      return `${first}_${last}@${domain}`;
+    case "firstname":
+      return `${first}@${domain}`;
+    case "flastname":
+      return `${first[0]}${last}@${domain}`;
+    case "firstl":
+      return `${first}${last[0]}@${domain}`;
+    case "firstinitial.lastname":
+      return `${first[0]}.${last}@${domain}`;
+    case "lastname.firstname":
+      return `${last}.${first}@${domain}`;
+    case "lastnameFirstname":
+      return `${last}${first}@${domain}`;
+    default:
+      return null;
+  }
+}
+
+function parseFullName(fullName: string): { firstName: string; lastName: string } | null {
+  const parts = fullName.trim().split(/\s+/);
+  if (parts.length < 2) return null;
+
+  // Handle common prefixes/suffixes
+  const prefixes = ["dr", "mr", "mrs", "ms", "prof"];
+  const suffixes = ["jr", "sr", "ii", "iii", "iv", "phd", "md", "esq"];
+
+  let cleanParts = parts.filter(p =>
+    !prefixes.includes(p.toLowerCase().replace(".", "")) &&
+    !suffixes.includes(p.toLowerCase().replace(".", ""))
+  );
+
+  if (cleanParts.length < 2) cleanParts = parts;
+
+  return {
+    firstName: cleanParts[0],
+    lastName: cleanParts[cleanParts.length - 1]
+  };
+}
+
+// Generate multiple email candidates for a person
+function generateEmailCandidates(
+  fullName: string,
+  domain: string,
+  detectedPattern?: EmailPattern
+): string[] {
+  const parsed = parseFullName(fullName);
+  if (!parsed) return [];
+
+  const { firstName, lastName } = parsed;
+  const candidates: string[] = [];
+
+  // If we detected a pattern, prioritize it
+  if (detectedPattern && detectedPattern !== "unknown") {
+    const primary = generateEmailFromPattern(firstName, lastName, detectedPattern, domain);
+    if (primary) candidates.push(primary);
+  }
+
+  // Add common patterns as fallbacks
+  const commonPatterns: EmailPattern[] = [
+    "firstname.lastname",
+    "flastname",
+    "firstname",
+    "firstinitial.lastname"
+  ];
+
+  for (const pattern of commonPatterns) {
+    if (pattern === detectedPattern) continue;
+    const email = generateEmailFromPattern(firstName, lastName, pattern, domain);
+    if (email && !candidates.includes(email)) {
+      candidates.push(email);
+    }
+  }
+
+  return candidates.slice(0, 4); // Return top 4 candidates
+}
+
+// ============================================================================
 // RATE-LIMITED API CALL WITH RETRY
 // ============================================================================
 
@@ -434,6 +647,34 @@ const agentTools: Anthropic.Tool[] = [
     }
   },
   {
+    name: "generate_email",
+    description: "Generate email candidates for a person based on detected company email pattern. Returns multiple candidates ranked by likelihood. Use after finding at least one employee email to detect the pattern.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        person_name: { type: "string", description: "Full name of the person (e.g., 'John Smith')" },
+        found_emails: {
+          type: "array",
+          items: { type: "string" },
+          description: "List of employee emails already found on the website (used to detect pattern)"
+        }
+      },
+      required: ["person_name", "found_emails"]
+    }
+  },
+  {
+    name: "validate_email",
+    description: "Validate if a generated email is likely real by checking MX records and searching for corroboration online.",
+    input_schema: {
+      type: "object" as const,
+      properties: {
+        email: { type: "string", description: "Email to validate" },
+        person_name: { type: "string", description: "Person's name for search corroboration" }
+      },
+      required: ["email", "person_name"]
+    }
+  },
+  {
     name: "submit_contacts",
     description: "Submit discovered contacts.",
     input_schema: {
@@ -510,22 +751,40 @@ export async function researchContacts(
 
   onProgress?.({ type: "phase", phase: "browsing", message: `Found key people: ${keyPeopleList}` });
 
+  // Pattern context for email generation
+  const patternContext: PatternContext = {
+    detectedPattern: null,
+    companyDomain: domain,
+    foundEmails: []
+  };
+
   // Phase 2: Agentic browsing
   const systemPrompt = `You find contacts for ${companyName} (${domain}).
 
 KEY PEOPLE TO FIND: ${keyPeopleList}
 
-TOOLS: browse_webpage, web_search, submit_contacts
+TOOLS: browse_webpage, web_search, generate_email, validate_email, submit_contacts
 
-STRATEGY:
-1. Browse https://${domain} and team/about/contact pages
-2. Submit contacts AS YOU FIND THEM
-3. For key people without emails, use web_search
-4. Departmental emails (info@, hr@) are valuable
+STRATEGY (CRITICAL - FOLLOW IN ORDER):
+1. Browse https://${domain} homepage - look for ANY emails
+2. Browse /about, /team, /contact, /leadership pages - collect ALL emails you see
+3. IMPORTANT: Once you find at least ONE employee email (like john.smith@domain.com), use generate_email tool to create emails for key executives
+4. Use validate_email to verify generated emails are real
+5. Use web_search as backup: search "Person Name ${domain} email" or "Person Name ${companyName} contact"
+6. Submit contacts AS YOU FIND THEM
 
-CONFIDENCE: direct_website=HIGH, osint_search=MEDIUM, pattern_match=LOW
+EMAIL PATTERN DETECTION:
+- Look for ANY email on the website (even generic ones help identify the domain)
+- Personal emails like john.smith@company.com reveal the pattern
+- Once you find an employee email, generate_email will use that pattern for executives
+- Even info@ or sales@ confirms the domain has valid MX records
 
-NEVER invent emails. Only submit real ones.`;
+CONFIDENCE LEVELS:
+- direct_website = HIGH (email found directly on website)
+- osint_search = MEDIUM (email found via web search)
+- pattern_match = MEDIUM if validated, LOW if not validated
+
+NEVER invent emails without using generate_email tool. Always try to validate generated emails.`;
 
   const messages: Anthropic.MessageParam[] = [{
     role: "user",
@@ -636,6 +895,21 @@ NEVER invent emails. Only submit real ones.`;
 
         const result = await fetchWebpage(url);
 
+        // Extract emails from result for pattern detection
+        if (result.success) {
+          const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+          const foundEmails = result.content.match(emailRegex) || [];
+          for (const email of foundEmails) {
+            if (!patternContext.foundEmails.includes(email.toLowerCase())) {
+              patternContext.foundEmails.push(email.toLowerCase());
+            }
+          }
+          // Try to detect pattern if we haven't yet
+          if (!patternContext.detectedPattern && patternContext.foundEmails.length > 0) {
+            patternContext.detectedPattern = detectEmailPattern(patternContext.foundEmails, domain);
+          }
+        }
+
         toolResults.push({
           type: "tool_result",
           tool_use_id: toolUse.id,
@@ -655,10 +929,134 @@ NEVER invent emails. Only submit real ones.`;
 
         const result = await webSearch(input.query);
 
+        // Extract emails from search results for pattern detection
+        if (result.success) {
+          const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
+          const foundEmails = result.results.match(emailRegex) || [];
+          for (const email of foundEmails) {
+            if (!patternContext.foundEmails.includes(email.toLowerCase())) {
+              patternContext.foundEmails.push(email.toLowerCase());
+            }
+          }
+        }
+
         toolResults.push({
           type: "tool_result",
           tool_use_id: toolUse.id,
           content: result.success ? result.results : `Error: ${result.error}`
+        });
+
+      } else if (toolUse.name === "generate_email") {
+        const input = toolUse.input as { person_name: string; found_emails: string[] };
+
+        onProgress?.({
+          type: "iteration",
+          iteration,
+          maxIterations: MAX_ITERATIONS,
+          action: `Generating emails for ${input.person_name}`
+        });
+
+        // Add any emails provided by the agent to our context
+        for (const email of input.found_emails || []) {
+          if (!patternContext.foundEmails.includes(email.toLowerCase())) {
+            patternContext.foundEmails.push(email.toLowerCase());
+          }
+        }
+
+        // Detect pattern from all found emails
+        const allEmails = [...patternContext.foundEmails];
+        const detectedPattern = detectEmailPattern(allEmails, domain);
+
+        if (!detectedPattern) {
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: toolUse.id,
+            content: `Could not detect email pattern. Found emails: ${allEmails.slice(0, 5).join(", ")}. Try finding more employee emails on the website, or use web_search.`
+          });
+          continue;
+        }
+
+        // Update pattern context
+        patternContext.detectedPattern = detectedPattern;
+
+        // Generate candidates
+        const candidates = generateEmailCandidates(
+          input.person_name,
+          domain,
+          detectedPattern.pattern
+        );
+
+        if (candidates.length === 0) {
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: toolUse.id,
+            content: `Could not generate email for "${input.person_name}". Name may be incomplete or invalid.`
+          });
+          continue;
+        }
+
+        const resultContent = `DETECTED PATTERN: ${detectedPattern.pattern} (${detectedPattern.confidence}% confidence)
+Examples: ${detectedPattern.examples.join(", ")}
+
+GENERATED CANDIDATES for ${input.person_name}:
+${candidates.map((c, i) => `${i + 1}. ${c}`).join("\n")}
+
+Use validate_email to check if these are real, or submit directly with found_method="pattern_match".
+Most likely: ${candidates[0]}`;
+
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: toolUse.id,
+          content: resultContent
+        });
+
+      } else if (toolUse.name === "validate_email") {
+        const input = toolUse.input as { email: string; person_name: string };
+
+        onProgress?.({
+          type: "iteration",
+          iteration,
+          maxIterations: MAX_ITERATIONS,
+          action: `Validating ${input.email}`
+        });
+
+        // Check MX records first
+        const mxValid = await verifyEmailDomain(input.email);
+
+        if (!mxValid) {
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: toolUse.id,
+            content: `INVALID: ${input.email} - Domain has no valid MX records. Email cannot receive mail.`
+          });
+          continue;
+        }
+
+        // Search for corroboration
+        const searchQuery = `"${input.email}" OR "${input.person_name}" ${domain} email`;
+        const searchResult = await webSearch(searchQuery);
+
+        let corroborated = false;
+        let corroborationSource = "";
+
+        if (searchResult.success) {
+          // Check if the exact email appears in search results
+          if (searchResult.results.toLowerCase().includes(input.email.toLowerCase())) {
+            corroborated = true;
+            corroborationSource = "Email found in web search results";
+          } else if (searchResult.results.toLowerCase().includes(input.person_name.toLowerCase())) {
+            corroborationSource = "Person name found in search, but email not directly confirmed";
+          }
+        }
+
+        const validationResult = corroborated
+          ? `VALIDATED: ${input.email}\n- MX records: VALID\n- Web corroboration: FOUND\n- ${corroborationSource}\n\nSubmit with found_method="pattern_match" and confidence will be MEDIUM.`
+          : `PARTIALLY VALIDATED: ${input.email}\n- MX records: VALID\n- Web corroboration: NOT FOUND\n- ${corroborationSource || "No additional confirmation"}\n\nYou can submit with found_method="pattern_match" but confidence will be LOW.`;
+
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: toolUse.id,
+          content: validationResult
         });
 
       } else if (toolUse.name === "submit_contacts") {
@@ -684,8 +1082,13 @@ NEVER invent emails. Only submit real ones.`;
           let confidence: "high" | "medium" | "low";
           if (contact.found_method === "direct_website" && mxVerified) {
             confidence = "high";
-          } else if (contact.found_method === "osint_search") {
+          } else if (contact.found_method === "osint_search" && mxVerified) {
             confidence = "medium";
+          } else if (contact.found_method === "pattern_match" && mxVerified) {
+            // Pattern-matched emails with valid MX are medium confidence
+            confidence = "medium";
+          } else if (contact.found_method === "pattern_match") {
+            confidence = "low";
           } else {
             confidence = "low";
           }
