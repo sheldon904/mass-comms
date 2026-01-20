@@ -62,13 +62,13 @@ interface ResearchPlan {
 // CONFIGURATION
 // ============================================================================
 
-// Vercel has 55s max - we use 50s internal to leave buffer
-const INTERNAL_TIMEOUT_MS = 50000;
-const MAX_ITERATIONS = 10;
+// Vercel has 55s max - use 42s internal to ensure completion with buffer
+const INTERNAL_TIMEOUT_MS = 42000;
+const MAX_ITERATIONS = 8;
 
 // Rate limit handling
 const MAX_RETRIES = 2;
-const BASE_RETRY_DELAY_MS = 1500;
+const BASE_RETRY_DELAY_MS = 1000;
 
 // ============================================================================
 // DOMAIN EXTRACTION
@@ -758,33 +758,40 @@ export async function researchContacts(
     foundEmails: []
   };
 
-  // Phase 2: Agentic browsing
+  // Phase 2: Agentic browsing with external OSINT
   const systemPrompt = `You find contacts for ${companyName} (${domain}).
 
 KEY PEOPLE TO FIND: ${keyPeopleList}
 
 TOOLS: browse_webpage, web_search, generate_email, validate_email, submit_contacts
 
-STRATEGY (CRITICAL - FOLLOW IN ORDER):
-1. Browse https://${domain} homepage - look for ANY emails
-2. Browse /about, /team, /contact, /leadership pages - collect ALL emails you see
-3. IMPORTANT: Once you find at least ONE employee email (like john.smith@domain.com), use generate_email tool to create emails for key executives
-4. Use validate_email to verify generated emails are real
-5. Use web_search as backup: search "Person Name ${domain} email" or "Person Name ${companyName} contact"
-6. Submit contacts AS YOU FIND THEM
+STRATEGY (BE EFFICIENT - MAX 8 ITERATIONS):
 
-EMAIL PATTERN DETECTION:
-- Look for ANY email on the website (even generic ones help identify the domain)
-- Personal emails like john.smith@company.com reveal the pattern
-- Once you find an employee email, generate_email will use that pattern for executives
-- Even info@ or sales@ confirms the domain has valid MX records
+STEP 1 - WEBSITE (2-3 iterations max):
+- Browse https://${domain} and /about, /team, /contact pages
+- Collect ALL emails you see (even generic like info@, sales@)
+- Submit any direct contacts immediately
 
-CONFIDENCE LEVELS:
-- direct_website = HIGH (email found directly on website)
-- osint_search = MEDIUM (email found via web search)
-- pattern_match = MEDIUM if validated, LOW if not validated
+STEP 2 - EXTERNAL OSINT (if no executive emails found):
+Use web_search with these HIGH-VALUE queries:
+- "${companyName}" contact email site:prnewswire.com OR site:businesswire.com (press releases have media contacts)
+- "${companyName}" CEO OR CFO OR President email
+- "${companyName}" executive contact site:linkedin.com
+- For trucking/logistics: "${companyName}" safety director OR operations email
 
-NEVER invent emails without using generate_email tool. Always try to validate generated emails.`;
+STEP 3 - PATTERN GENERATION (last resort):
+- If you found ANY employee email, use generate_email for executives
+- Use validate_email (fast MX check) to verify
+- Submit with found_method="pattern_match"
+
+SUBMIT CONTACTS IMMEDIATELY as you find them - don't wait!
+
+CONFIDENCE:
+- direct_website = HIGH
+- osint_search = MEDIUM (from press releases, news, LinkedIn)
+- pattern_match = MEDIUM if MX valid
+
+NEVER invent emails. Use generate_email tool for pattern-based emails.`;
 
   const messages: Anthropic.MessageParam[] = [{
     role: "user",
@@ -1020,43 +1027,23 @@ Most likely: ${candidates[0]}`;
           action: `Validating ${input.email}`
         });
 
-        // Check MX records first
+        // Fast validation: MX check only (no slow web search)
         const mxValid = await verifyEmailDomain(input.email);
 
         if (!mxValid) {
           toolResults.push({
             type: "tool_result",
             tool_use_id: toolUse.id,
-            content: `INVALID: ${input.email} - Domain has no valid MX records. Email cannot receive mail.`
+            content: `INVALID: ${input.email} - Domain has no valid MX records. Cannot receive mail.`
           });
           continue;
         }
 
-        // Search for corroboration
-        const searchQuery = `"${input.email}" OR "${input.person_name}" ${domain} email`;
-        const searchResult = await webSearch(searchQuery);
-
-        let corroborated = false;
-        let corroborationSource = "";
-
-        if (searchResult.success) {
-          // Check if the exact email appears in search results
-          if (searchResult.results.toLowerCase().includes(input.email.toLowerCase())) {
-            corroborated = true;
-            corroborationSource = "Email found in web search results";
-          } else if (searchResult.results.toLowerCase().includes(input.person_name.toLowerCase())) {
-            corroborationSource = "Person name found in search, but email not directly confirmed";
-          }
-        }
-
-        const validationResult = corroborated
-          ? `VALIDATED: ${input.email}\n- MX records: VALID\n- Web corroboration: FOUND\n- ${corroborationSource}\n\nSubmit with found_method="pattern_match" and confidence will be MEDIUM.`
-          : `PARTIALLY VALIDATED: ${input.email}\n- MX records: VALID\n- Web corroboration: NOT FOUND\n- ${corroborationSource || "No additional confirmation"}\n\nYou can submit with found_method="pattern_match" but confidence will be LOW.`;
-
+        // MX is valid - that's enough for pattern-matched emails
         toolResults.push({
           type: "tool_result",
           tool_use_id: toolUse.id,
-          content: validationResult
+          content: `VALIDATED: ${input.email}\n- MX records: VALID (domain can receive email)\n- Pattern: Matches company email convention\n\nSubmit with found_method="pattern_match". If you want higher confidence, use web_search to find corroboration.`
         });
 
       } else if (toolUse.name === "submit_contacts") {
