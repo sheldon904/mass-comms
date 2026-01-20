@@ -167,6 +167,88 @@ function extractPhonesFromText(text: string): string[] {
   return Array.from(new Set(matches));
 }
 
+// ============================================================================
+// EMAIL PREFIX TO NAME CONVERSION
+// ============================================================================
+
+/**
+ * Converts an email prefix to a proper display name.
+ * Examples:
+ *   - sales → "Sales"
+ *   - driverrecruitingdepartment → "Driver Recruiting Department"
+ *   - info → "General Inquiries"
+ *   - john.smith → "John Smith"
+ */
+function emailPrefixToName(email: string): string {
+  const prefix = email.split("@")[0].toLowerCase();
+
+  // Special cases for common generic emails
+  const specialCases: Record<string, string> = {
+    "info": "General Inquiries",
+    "contact": "Contact",
+    "support": "Support Team",
+    "sales": "Sales",
+    "help": "Help Desk",
+    "admin": "Administration",
+    "hr": "Human Resources",
+    "jobs": "Careers",
+    "careers": "Careers",
+    "press": "Press Relations",
+    "media": "Media Relations",
+    "pr": "Public Relations",
+    "marketing": "Marketing",
+    "billing": "Billing",
+    "accounts": "Accounts",
+    "hello": "General Contact",
+    "enquiries": "Enquiries",
+    "enquiry": "Enquiries",
+    "feedback": "Feedback",
+    "webmaster": "Webmaster",
+  };
+
+  if (specialCases[prefix]) {
+    return specialCases[prefix];
+  }
+
+  // Check if it looks like a person name (contains . or first.last pattern)
+  if (prefix.includes(".")) {
+    const parts = prefix.split(".");
+    return parts.map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(" ");
+  }
+
+  // Check for camelCase or concatenated words
+  // Insert spaces before capital letters and numbers
+  let spaced = prefix
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/([a-zA-Z])(\d)/g, "$1 $2")
+    .replace(/(\d)([a-zA-Z])/g, "$1 $2");
+
+  // Try to split concatenated lowercase words using common patterns
+  const departmentWords = [
+    "department", "dept", "team", "group", "office", "center", "centre",
+    "recruiting", "recruitment", "driver", "drivers", "customer", "service",
+    "services", "inquiries", "inquiry", "relations", "resources", "management",
+    "operations", "accounting", "finance", "legal", "compliance", "safety"
+  ];
+
+  for (const word of departmentWords) {
+    const regex = new RegExp(`(${word})`, "gi");
+    spaced = spaced.replace(regex, " $1 ");
+  }
+
+  // Clean up and capitalize
+  const words = spaced
+    .split(/[\s_-]+/)
+    .filter(w => w.length > 0)
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+
+  if (words.length === 0) {
+    return "Contact";
+  }
+
+  return words.join(" ");
+}
+
 function stripHtml(html: string): string {
   return html
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, "")
@@ -392,11 +474,34 @@ async function searchLinkedInForPerson(
   const emails: string[] = [];
   const info: string[] = [];
 
+  // Extract name parts for variations
+  const nameParts = personName.split(/\s+/);
+  const firstName = nameParts[0] || "";
+  const lastName = nameParts[nameParts.length - 1] || "";
+
   const queries = [
+    // Standard LinkedIn dorking
     `site:linkedin.com "${personName}" "${companyName}" email`,
     `site:linkedin.com/in "${personName}" "${companyName}"`,
+    `site:linkedin.com "${firstName}" "${lastName}" "${companyName}"`,
+
+    // Email contact searches
     `"${personName}" "${companyName}" email contact`,
     `"${personName}" "${companyName}" @`,
+    `"${firstName} ${lastName}" email "${companyName}"`,
+
+    // RocketReach/ZoomInfo style - public profile aggregators
+    `"${personName}" "${companyName}" site:rocketreach.co`,
+    `"${personName}" "${companyName}" site:zoominfo.com`,
+    `"${personName}" "${companyName}" site:apollo.io`,
+    `"${personName}" "${companyName}" site:lusha.com`,
+
+    // SignalHire style - contact lookup
+    `"${personName}" "${companyName}" site:signalhire.com`,
+
+    // Public databases
+    `"${personName}" "${companyName}" site:opencorporates.com`,
+    `"${personName}" "${companyName}" site:dnb.com`,
   ];
 
   for (const query of queries) {
@@ -413,7 +518,7 @@ async function searchLinkedInForPerson(
 
         // Look for LinkedIn profile snippets
         if (text.toLowerCase().includes(personName.toLowerCase())) {
-          info.push(`Found mention in LinkedIn search for: ${query.substring(0, 50)}`);
+          info.push(`Found mention in search for: ${query.substring(0, 50)}`);
         }
       }
     } catch {
@@ -421,7 +526,7 @@ async function searchLinkedInForPerson(
     }
 
     // Rate limit
-    await new Promise(r => setTimeout(r, 300));
+    await new Promise(r => setTimeout(r, 250));
   }
 
   return { emails: Array.from(new Set(emails)), info };
@@ -440,6 +545,11 @@ async function harvesterSearchForPerson(
   const phones: string[] = [];
   const sources: string[] = [];
 
+  // Extract first/last name for more targeted queries
+  const nameParts = personName.split(/\s+/);
+  const firstName = nameParts[0] || "";
+  const lastName = nameParts[nameParts.length - 1] || "";
+
   const searches = [
     // Direct person + company email search
     { engine: "bing", query: `"${personName}" "${companyName}" email` },
@@ -449,12 +559,38 @@ async function harvesterSearchForPerson(
     // Press releases often have contact info
     { engine: "bing", query: `site:prnewswire.com "${personName}" "${companyName}"` },
     { engine: "bing", query: `site:businesswire.com "${personName}" "${companyName}"` },
+    { engine: "bing", query: `site:globenewswire.com "${personName}" "${companyName}"` },
 
-    // News articles
+    // News articles - more aggressive
     { engine: "bing", query: `"${personName}" "${companyName}" CEO OR President OR Director email` },
+    { engine: "bing", query: `"${personName}" "${companyName}" contact OR email OR phone` },
+    { engine: "ddg", query: `"${personName}" "${companyName}" announcement OR appointed` },
 
-    // Social profiles
+    // Social profiles - more thorough
     { engine: "ddg", query: `"${personName}" "${companyName}" twitter OR linkedin email` },
+    { engine: "bing", query: `site:twitter.com "${personName}" "${companyName}"` },
+
+    // SEC/regulatory filings
+    { engine: "bing", query: `site:sec.gov "${personName}" "${companyName}"` },
+
+    // Industry directories
+    { engine: "bing", query: `"${personName}" "${companyName}" site:zoominfo.com OR site:apollo.io OR site:leadiq.com` },
+
+    // Conference speakers/attendees often have contact info
+    { engine: "ddg", query: `"${personName}" "${companyName}" speaker OR conference OR panel` },
+
+    // Podcast/interview appearances
+    { engine: "bing", query: `"${personName}" "${companyName}" podcast OR interview` },
+
+    // Direct domain email patterns in search
+    { engine: "bing", query: `"${firstName}.${lastName}@${domain}"` },
+    { engine: "bing", query: `"${firstName[0]}${lastName}@${domain}"` },
+
+    // Hunter.io style - look for existing email patterns
+    { engine: "bing", query: `site:${domain} email OR contact OR "@${domain}"` },
+
+    // Data breach/paste sites (public) - these often reveal real email patterns
+    { engine: "ddg", query: `"@${domain}" "${lastName}" email` },
   ];
 
   for (const { engine, query } of searches) {
@@ -697,30 +833,65 @@ async function researchPerson(
   onProgress?.({
     type: "iteration",
     iteration: 1,
-    maxIterations: 5,
+    maxIterations: 6,
     action: `Researching ${person.name} (${person.role})...`
   });
 
-  // 1. Generate email permutations
+  // 1. Generate email permutations - but DON'T add them yet
+  //    We'll verify them FIRST before adding to candidates
   const permutations = generateEmailPermutations(person.firstName, person.lastName, domain);
-  for (const email of permutations.slice(0, 5)) {
-    candidates.push({
-      email,
-      personName: person.name,
-      role: person.role,
-      sources: ["Pattern generated"],
-      corroborations: [],
-      smtpVerified: false,
-      platformsFound: []
-    });
-    allEmails.add(email);
-  }
+  const permutationsToVerify = permutations.slice(0, 6); // Top 6 patterns to check
 
-  // 2. CrossLinked-style LinkedIn search
+  // 2. Verify pattern-generated emails with SMTP BEFORE adding
   onProgress?.({
     type: "iteration",
     iteration: 2,
-    maxIterations: 5,
+    maxIterations: 6,
+    action: `Verifying email patterns for ${person.name}...`
+  });
+
+  // First check MX once for domain
+  const domainMxValid = await verifyEmailMX(`test@${domain}`);
+  if (domainMxValid) {
+    for (const email of permutationsToVerify) {
+      // SMTP verification - only add if verified or possibly valid
+      const smtpResult = await verifyEmailSMTP(email);
+
+      if (smtpResult.exists === "yes") {
+        // VERIFIED! Add with high priority
+        candidates.push({
+          email,
+          personName: person.name,
+          role: person.role,
+          sources: ["Pattern generated (SMTP verified)"],
+          corroborations: [],
+          smtpVerified: true,
+          platformsFound: []
+        });
+        allEmails.add(email);
+        console.log(`[SMTP] VERIFIED: ${email}`);
+      } else if (smtpResult.exists === "unknown" && smtpResult.reason.includes("MX valid")) {
+        // Server didn't reject but also didn't confirm - still worth adding
+        candidates.push({
+          email,
+          personName: person.name,
+          role: person.role,
+          sources: ["Pattern generated (MX valid)"],
+          corroborations: [],
+          smtpVerified: false,
+          platformsFound: []
+        });
+        allEmails.add(email);
+      }
+      // If "no" - email definitely doesn't exist, don't add it
+    }
+  }
+
+  // 3. CrossLinked-style LinkedIn search
+  onProgress?.({
+    type: "iteration",
+    iteration: 3,
+    maxIterations: 6,
     action: `LinkedIn search for ${person.name}...`
   });
 
@@ -740,11 +911,11 @@ async function researchPerson(
     }
   }
 
-  // 3. theHarvester-style multi-source search
+  // 4. theHarvester-style multi-source search
   onProgress?.({
     type: "iteration",
-    iteration: 3,
-    maxIterations: 5,
+    iteration: 4,
+    maxIterations: 6,
     action: `OSINT search for ${person.name}...`
   });
 
@@ -770,11 +941,11 @@ async function researchPerson(
     }
   }
 
-  // 4. gitSome-style GitHub search
+  // 5. gitSome-style GitHub search
   onProgress?.({
     type: "iteration",
-    iteration: 4,
-    maxIterations: 5,
+    iteration: 5,
+    maxIterations: 6,
     action: `GitHub search for ${person.name}...`
   });
 
@@ -794,11 +965,11 @@ async function researchPerson(
     }
   }
 
-  // 5. Verify and corroborate top candidates
+  // 6. Verify and corroborate remaining candidates (non-pattern ones)
   onProgress?.({
     type: "iteration",
-    iteration: 5,
-    maxIterations: 5,
+    iteration: 6,
+    maxIterations: 6,
     action: `Verifying emails for ${person.name}...`
   });
 
@@ -829,11 +1000,17 @@ async function researchPerson(
   }
 
   return candidates.filter(c => {
-    // Keep if: MX valid AND (SMTP verified OR found on platform OR corroborated OR multiple sources)
+    // Keep if:
+    // 1. SMTP verified (definite valid email)
+    // 2. Found on platform (Gravatar, GitHub)
+    // 3. Corroborated online
+    // 4. Multiple independent sources
+    // 5. Pattern generated with MX valid (give benefit of doubt)
     const hasEvidence = c.smtpVerified ||
                         c.platformsFound.length > 0 ||
                         c.corroborations.length > 0 ||
-                        c.sources.length > 1;
+                        c.sources.length > 1 ||
+                        c.sources.some(s => s.includes("MX valid"));
     return hasEvidence;
   });
 }
@@ -985,14 +1162,22 @@ export async function researchContacts(
         // This is a company email - add as a contact directly
         const mxValid = await verifyEmailMX(email);
         if (mxValid && !finalContacts.some(c => c.email === email)) {
+          // Derive proper name from email prefix instead of generic "Website Contact"
+          const derivedName = emailPrefixToName(email);
+
+          // SMTP verify the email to boost confidence
+          const smtpResult = await verifyEmailSMTP(email);
+          const smtpVerified = smtpResult.exists === "yes";
+          const confidence = smtpVerified ? "high" : "medium";
+
           finalContacts.push({
-            name: "Website Contact",
+            name: derivedName,
             email,
             phone: websiteData.phones[0] || null,
-            role: "Contact",
-            confidence: "medium",
+            role: derivedName.includes("Department") || derivedName.includes("Team") ? derivedName : "Contact",
+            confidence,
             source: "Company website",
-            verified: true
+            verified: smtpVerified
           });
           onProgress?.({ type: "contact", contact: finalContacts[finalContacts.length - 1] });
         }
@@ -1021,13 +1206,22 @@ export async function researchContacts(
     // Convert best candidates to contacts
     for (const candidate of candidates.slice(0, 2)) { // Top 2 per person
       if (!finalContacts.some(c => c.email === candidate.email)) {
-        // Calculate confidence
+        // Calculate confidence - prioritize SMTP verification
         let confidence: "high" | "medium" | "low" = "low";
 
-        if (candidate.smtpVerified && candidate.corroborations.length > 0) {
-          confidence = "high";
-        } else if (candidate.smtpVerified || candidate.platformsFound.length > 0 || candidate.sources.length > 1) {
+        const isPatternGenerated = candidate.sources.some(s => s.includes("Pattern generated"));
+
+        if (candidate.smtpVerified) {
+          // SMTP verified = at minimum medium, or high if corroborated
+          if (candidate.corroborations.length > 0 || candidate.platformsFound.length > 0) {
+            confidence = "high";
+          } else {
+            confidence = "medium"; // SMTP verified pattern emails get medium
+          }
+        } else if (candidate.platformsFound.length > 0 || candidate.sources.length > 1) {
           confidence = "medium";
+        } else if (isPatternGenerated && candidate.sources.some(s => s.includes("MX valid"))) {
+          confidence = "low"; // MX valid but not SMTP verified = low
         }
 
         const source = candidate.sources.join(", ").substring(0, 100);
