@@ -4,8 +4,9 @@ import { Prisma } from "@prisma/client";
 
 export async function PUT(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
+  const { id } = await params;
   try {
     const body = await request.json();
     const { name, email, phone, role } = body;
@@ -18,7 +19,7 @@ export async function PUT(
     }
 
     const contact = await prisma.contact.update({
-      where: { id: params.id },
+      where: { id: id },
       data: {
         name,
         email,
@@ -51,11 +52,12 @@ export async function PUT(
 
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
+  const { id } = await params;
   try {
     await prisma.contact.delete({
-      where: { id: params.id },
+      where: { id: id },
     });
 
     return NextResponse.json({ success: true });
