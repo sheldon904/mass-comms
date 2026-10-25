@@ -3,8 +3,9 @@ import { prisma } from "@/lib/db";
 
 export async function PUT(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
+  const { id } = await params;
   try {
     const body = await request.json();
     const { subject, body: emailBody, status } = body;
@@ -16,7 +17,7 @@ export async function PUT(
     if (status !== undefined) updateData.status = status;
 
     const email = await prisma.email.update({
-      where: { id: params.id },
+      where: { id: id },
       data: updateData,
     });
 
@@ -32,11 +33,12 @@ export async function PUT(
 
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
+  const { id } = await params;
   try {
     await prisma.email.delete({
-      where: { id: params.id },
+      where: { id: id },
     });
 
     return NextResponse.json({ success: true });

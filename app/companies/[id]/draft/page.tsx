@@ -28,23 +28,24 @@ async function getCompany(id: string) {
 export default async function DraftPage({
   params,
 }: {
-  params: { id: string };
+  params: Promise<{ id: string }>;
 }) {
-  const company = await getCompany(params.id);
+  const { id } = await params;
+  const company = await getCompany(id);
 
   if (!company) {
     notFound();
   }
 
   if (company.contacts.length === 0) {
-    redirect(`/companies/${params.id}`);
+    redirect(`/companies/${id}`);
   }
 
   return (
     <div className="space-y-8">
       <div className="flex items-center gap-4">
         <Button variant="ghost" size="icon" asChild>
-          <Link href={`/companies/${params.id}`}>
+          <Link href={`/companies/${id}`}>
             <ArrowLeft className="h-5 w-5" />
           </Link>
         </Button>
